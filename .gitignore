@@ -1,0 +1,15 @@
+# Scratchpad
+scratch/
+
+# Assessments
+assessments/
+
+# Learning artifacts
+APPROACH.md
+FLASHCARDS.md
+
+# TLC model checker artifacts
+**/states/
+*.bin
+*.st
+*.fp
