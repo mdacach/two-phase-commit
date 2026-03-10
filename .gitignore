@@ -7,6 +7,7 @@ assessments/
 # Learning artifacts
 APPROACH.md
 FLASHCARDS.md
+**/learning/
 
 # Rust build artifacts
 target/
