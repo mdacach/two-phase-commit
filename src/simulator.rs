@@ -23,6 +23,7 @@
 mod event;
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::Range;
 
 use rand::Rng;
@@ -38,6 +39,8 @@ use crate::types::*;
 pub use event::ExternalEvent;
 use event::{Event, InternalEvent};
 
+// REVIEW: Make it so the delivery delay range contains 1, and instead messages arrive at clock + delivery_delay.
+//         Will need to update documentation too.
 pub struct Simulator {
     coordinator: Coordinator,
     participants: BTreeMap<NodeId, Participant>,
@@ -47,6 +50,8 @@ pub struct Simulator {
     /// Random delay added to each message delivery. An empty range means
     /// zero delay (messages arrive at `clock + 1`).
     delivery_delay: Range<u64>,
+    /// Append-only record of every event processed and message sent.
+    action_log: Vec<LogEntry>,
 }
 
 impl Simulator {
@@ -71,6 +76,7 @@ impl Simulator {
             clock: 0,
             rng,
             delivery_delay,
+            action_log: Vec::new(),
         }
     }
 
@@ -86,6 +92,11 @@ impl Simulator {
                 0
             };
             let deliver_at = self.clock + 1 + delay;
+            self.action_log.push(LogEntry::Send {
+                at: self.clock,
+                deliver_at,
+                msg: msg.clone(),
+            });
             self.event_queue.insert(
                 deliver_at,
                 Event::Internal(InternalEvent::Deliver { to: msg.to, msg }),
@@ -104,40 +115,54 @@ impl Simulator {
         self.clock = timestamp;
 
         let outgoing = match ev {
-            Event::External(ExternalEvent::StartTransaction) => {
-                let msg = Message {
-                    message_type: MessageType::StartTransaction,
-                    from: ActorId::Coordinator,
-                    to: ActorId::Coordinator,
-                };
-                self.coordinator.on_message(&msg, self.clock)
-            }
-            Event::External(ExternalEvent::Tick { to }) => match to {
-                ActorId::Coordinator => self.coordinator.tick(self.clock),
-                ActorId::Node(id) => self
-                    .participants
-                    .get_mut(&id)
-                    .map(|p| p.tick(self.clock))
-                    .unwrap_or_default(),
-            },
-            Event::External(ExternalEvent::TickAll) => {
-                let mut out = self.coordinator.tick(self.clock);
-                let node_ids: Vec<NodeId> = self.participants.keys().copied().collect();
-                for id in node_ids {
-                    if let Some(p) = self.participants.get_mut(&id) {
-                        out.extend(p.tick(self.clock));
+            Event::External(ref ext) => {
+                self.action_log.push(LogEntry::ExternalEvent {
+                    at: self.clock,
+                    event: ext.clone(),
+                });
+                match ext {
+                    ExternalEvent::StartTransaction => {
+                        let msg = Message {
+                            message_type: MessageType::StartTransaction,
+                            from: ActorId::Coordinator,
+                            to: ActorId::Coordinator,
+                        };
+                        self.coordinator.on_message(&msg, self.clock)
+                    }
+                    ExternalEvent::Tick { to } => match to {
+                        ActorId::Coordinator => self.coordinator.tick(self.clock),
+                        ActorId::Node(id) => self
+                            .participants
+                            .get_mut(id)
+                            .map(|p| p.tick(self.clock))
+                            .unwrap_or_default(),
+                    },
+                    ExternalEvent::TickAll => {
+                        let mut out = self.coordinator.tick(self.clock);
+                        let node_ids: Vec<NodeId> = self.participants.keys().copied().collect();
+                        for id in node_ids {
+                            if let Some(p) = self.participants.get_mut(&id) {
+                                out.extend(p.tick(self.clock));
+                            }
+                        }
+                        out
                     }
                 }
-                out
             }
-            Event::Internal(InternalEvent::Deliver { to, msg }) => match to {
-                ActorId::Coordinator => self.coordinator.on_message(&msg, self.clock),
-                ActorId::Node(id) => self
-                    .participants
-                    .get_mut(&id)
-                    .map(|p| p.on_message(&msg, self.clock))
-                    .unwrap_or_default(),
-            },
+            Event::Internal(InternalEvent::Deliver { to, msg }) => {
+                self.action_log.push(LogEntry::Deliver {
+                    at: self.clock,
+                    msg: msg.clone(),
+                });
+                match to {
+                    ActorId::Coordinator => self.coordinator.on_message(&msg, self.clock),
+                    ActorId::Node(id) => self
+                        .participants
+                        .get_mut(&id)
+                        .map(|p| p.on_message(&msg, self.clock))
+                        .unwrap_or_default(),
+                }
+            }
         };
 
         self.enqueue_outgoing(outgoing);
@@ -185,5 +210,61 @@ impl Simulator {
 
     pub fn participants(&self) -> &BTreeMap<NodeId, Participant> {
         &self.participants
+    }
+
+    pub fn log(&self) -> &[LogEntry] {
+        &self.action_log
+    }
+
+    /// Format the full event log as a human-readable timeline.
+    pub fn format_log(&self) -> String {
+        self.action_log
+            .iter()
+            .map(|entry| entry.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// A record of something that happened during simulation.
+#[derive(Debug, Clone)]
+pub enum LogEntry {
+    /// An external event was processed.
+    ExternalEvent { at: u64, event: ExternalEvent },
+    /// A message was delivered to an actor and processed.
+    Deliver { at: u64, msg: Message },
+    /// A message was enqueued for future delivery.
+    Send {
+        at: u64,
+        deliver_at: u64,
+        msg: Message,
+    },
+}
+
+impl fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogEntry::ExternalEvent { at, event } => {
+                write!(f, "t={at:<4} [Event]   {event:?}")
+            }
+            LogEntry::Deliver { at, msg } => {
+                write!(
+                    f,
+                    "t={at:<4} [Deliver] {} → {}: {:?}",
+                    msg.from, msg.to, msg.message_type,
+                )
+            }
+            LogEntry::Send {
+                at,
+                deliver_at,
+                msg,
+            } => {
+                write!(
+                    f,
+                    "t={at:<4} [Send]    {} → {}: {:?} (deliver@{deliver_at})",
+                    msg.from, msg.to, msg.message_type,
+                )
+            }
+        }
     }
 }
