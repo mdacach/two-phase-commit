@@ -1,7 +1,5 @@
 ---- MODULE TwoPhaseCommit ----
 
-EXTENDS FiniteSets
-
 CONSTANT Participants
 
 VARIABLES messages,
@@ -28,6 +26,8 @@ VOTED   == "voted"
 DECIDED == "decided"
 DONE    == "done"
 
+COORDINATOR == "coordinator"
+
 NONE == "none"
 
 Init ==
@@ -38,9 +38,6 @@ Init ==
     /\ votes                = [p \in Participants |-> NONE]
     /\ decision             = [p \in Participants |-> NONE]
 
-\* --- Helper: send a message ---
-Send(msg) == messages' = messages \union {msg}
-
 \* --- Coordinator Actions ---
 
 \* At the start of the protocol, the coordinator sends a PREPARE message to
@@ -48,7 +45,7 @@ Send(msg) == messages' = messages \union {msg}
 CoordinatorSendPrepare ==
     /\ coordinator_phase = WAITING
     /\ messages' = messages \union
-           {[type |-> PREPARE, source |-> "coordinator", destination |-> p]
+           {[type |-> PREPARE, source |-> COORDINATOR, destination |-> p]
             : p \in Participants}
     /\ coordinator_phase' = VOTING
     /\ UNCHANGED <<coordinator_decision, participant_phase, votes, decision>>
@@ -65,7 +62,7 @@ CoordinatorReceiveVote(p) ==
     /\ \E msg \in messages :
         /\ msg.type \in {VOTE_COMMIT, VOTE_ABORT}
         /\ msg.source = p
-        /\ msg.destination = "coordinator"
+        /\ msg.destination = COORDINATOR
         /\ votes' = [votes EXCEPT ![p] = msg.type]
         /\ IF msg.type = VOTE_ABORT
            THEN /\ coordinator_phase' = DECIDED
@@ -89,7 +86,7 @@ CoordinatorDecide ==
 CoordinatorSendDecision ==
     /\ coordinator_phase = DECIDED
     /\ messages' = messages \union
-           {[type |-> coordinator_decision, source |-> "coordinator",
+           {[type |-> coordinator_decision, source |-> COORDINATOR,
              destination |-> p] : p \in Participants}
     /\ coordinator_phase' = DONE
     /\ UNCHANGED <<coordinator_decision, participant_phase, votes, decision>>
@@ -104,7 +101,8 @@ ParticipantVote(p) ==
         /\ msg.type = PREPARE
         /\ msg.destination = p
     /\ \E v \in {VOTE_COMMIT, VOTE_ABORT} :
-        /\ Send([type |-> v, source |-> p, destination |-> "coordinator"])
+        /\ messages' = messages \union
+               {[type |-> v, source |-> p, destination |-> COORDINATOR]}
         /\ participant_phase' = [participant_phase EXCEPT ![p] = VOTED]
     /\ UNCHANGED <<coordinator_phase, coordinator_decision, votes, decision>>
 
@@ -137,10 +135,12 @@ FairSpec == Spec /\ WF_vars(Next)
 
 \* --- Type Invariant ---
 
-Message == [type        : {PREPARE, VOTE_COMMIT, VOTE_ABORT, COMMIT, ABORT},
-            source      : Participants \union {"coordinator"},
-            destination : Participants \union {"coordinator"}]
-
+Message ==
+    \* Coordinator -> Participants
+    [type : {PREPARE, COMMIT, ABORT}, source : {COORDINATOR}, destination : Participants]
+    \union
+    \* Participants -> Coordinator
+    [type : {VOTE_COMMIT, VOTE_ABORT}, source : Participants, destination : {COORDINATOR}]
 TypeCheck ==
     /\ messages \subseteq Message
     /\ coordinator_phase \in {WAITING, VOTING, DECIDED, DONE}
