@@ -8,6 +8,9 @@ assessments/
 APPROACH.md
 FLASHCARDS.md
 
+# Rust build artifacts
+target/
+
 # TLC model checker artifacts
 **/states/
 *.bin
