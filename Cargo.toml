@@ -1,0 +1,11 @@
+[package]
+name = "two-phase-commit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.9"
+rand_chacha = "0.9"
+
+[dev-dependencies]
+proptest = { version = "1", features = ["attr-macro"] }
