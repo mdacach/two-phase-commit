@@ -19,4 +19,12 @@ pub trait StateMachine {
     fn tick(&mut self, _at_time: u64) -> Vec<Message> {
         vec![]
     }
+    fn recover(&mut self, _at_time: u64) {}
+
+    /// Returns `true` if this actor is in a terminal state and will not
+    /// spontaneously produce new messages (i.e. `tick` will always return
+    /// empty).  Receiving a message may still elicit a response.
+    fn is_quiescent(&self) -> bool {
+        false
+    }
 }

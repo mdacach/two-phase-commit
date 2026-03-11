@@ -27,6 +27,8 @@
 //! (commit direction). The TLA+ `Agreement` invariant corresponds to
 //! [`properties::check_agreement`].
 
+// REVIEW: Update documentation to reflect Alloy's specification too.
+
 pub mod coordinator;
 pub mod participant;
 pub mod properties;

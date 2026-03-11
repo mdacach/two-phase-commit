@@ -48,6 +48,7 @@ pub enum MessageType {
     VoteAbort,
     DecisionCommit,
     DecisionAbort,
+    Ack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
