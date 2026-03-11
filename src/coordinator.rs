@@ -3,11 +3,27 @@
 //! # Phase transitions
 //!
 //! ```text
-//! Waiting ──StartTransaction──▶ Voting ──try_decide──▶ Decided(d) ──try_send_decision──▶ Done(d)
+//! Waiting ──StartTransaction──▶ Voting ──try_decide──▶ Decided(d) ──try_send_decision──▶ AwaitingAcks(d) ──all acks──▶ Done(d)
 //!                                  │                       ▲
 //!                                  └──spontaneous abort────┘
 //!                                       (tick, prob = abort_bias / 10)
 //! ```
+//!
+//! # Retransmission
+//!
+//! The coordinator retransmits on `tick` if `retransmit_timeout` time has
+//! elapsed since the last send:
+//! - In `Voting`: retransmit Prepare to nodes with no recorded vote.
+//! - In `AwaitingAcks`: retransmit Decision to unacked nodes.
+//!
+//! # Crash recovery (WAL)
+//!
+//! The coordinator holds a `Wal` struct representing durable on-disk state.
+//! On `recover()`:
+//! - If `wal.decision` is `Some(d)`: reset to `Decided(d)`, retransmit on
+//!   next tick.
+//! - If `None`: reset to `Voting`, clear votes, retransmit Prepare on next
+//!   tick.
 //!
 //! # `abort_bias`
 //!
@@ -31,7 +47,7 @@
 //! simulator relies on this: it does **not** tick actors before delivering
 //! messages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -45,31 +61,50 @@ pub enum CoordinatorPhase {
     Waiting,
     Voting,
     Decided(Decision),
+    AwaitingAcks(Decision),
     Done(Decision),
 }
 
 struct Config {
     rng: ChaCha8Rng,
     abort_bias: f64,
+    retransmit_timeout: u64,
 }
 
-// REVIEW: Derive debug for coordinator to be used in logs and errors if needed.
+struct Wal {
+    decision: Option<Decision>,
+}
+
 pub struct Coordinator {
     nodes: Vec<NodeId>,
     phase: CoordinatorPhase,
     votes: BTreeMap<NodeId, Decision>,
+    acks: BTreeSet<NodeId>,
+    last_prepare_time: Option<u64>,
+    last_decision_time: Option<u64>,
+    wal: Wal,
     config: Config,
 }
 
 impl Coordinator {
-    pub fn new(nodes: Vec<NodeId>, rng_seed: u64, abort_bias: f64) -> Self {
+    pub fn new(
+        nodes: Vec<NodeId>,
+        rng_seed: u64,
+        abort_bias: f64,
+        retransmit_timeout: u64,
+    ) -> Self {
         Self {
             nodes,
             phase: CoordinatorPhase::Waiting,
             votes: BTreeMap::new(),
+            acks: BTreeSet::new(),
+            last_prepare_time: None,
+            last_decision_time: None,
+            wal: Wal { decision: None },
             config: Config {
                 rng: ChaCha8Rng::seed_from_u64(rng_seed),
                 abort_bias,
+                retransmit_timeout,
             },
         }
     }
@@ -80,7 +115,9 @@ impl Coordinator {
 
     pub fn decision(&self) -> Option<Decision> {
         match self.phase {
-            CoordinatorPhase::Decided(d) | CoordinatorPhase::Done(d) => Some(d),
+            CoordinatorPhase::Decided(d)
+            | CoordinatorPhase::AwaitingAcks(d)
+            | CoordinatorPhase::Done(d) => Some(d),
             _ => None,
         }
     }
@@ -117,13 +154,15 @@ impl Coordinator {
         }
     }
 
-    /// If in `Decided`, broadcast the decision to all participants and
-    /// transition to `Done`. No-op in any other phase.
-    fn try_send_decision(&mut self) -> Vec<Message> {
+    /// If in `Decided`, write to WAL, broadcast the decision to all
+    /// participants, and transition to `AwaitingAcks`. No-op in any other phase.
+    fn try_send_decision(&mut self, at_time: u64) -> Vec<Message> {
         let CoordinatorPhase::Decided(decision) = self.phase else {
             return vec![];
         };
-        self.phase = CoordinatorPhase::Done(decision);
+        self.wal.decision = Some(decision);
+        self.phase = CoordinatorPhase::AwaitingAcks(decision);
+        self.last_decision_time = Some(at_time);
         let message_type = match decision {
             Decision::Commit => MessageType::DecisionCommit,
             Decision::Abort => MessageType::DecisionAbort,
@@ -139,7 +178,6 @@ impl Coordinator {
     }
 }
 
-// REVIEW: Use tracing for logging.
 impl StateMachine for Coordinator {
     fn on_message(&mut self, msg: &Message, at_time: u64) -> Vec<Message> {
         let mut outgoing = self.tick(at_time);
@@ -147,6 +185,7 @@ impl StateMachine for Coordinator {
         match (msg.message_type, self.phase) {
             (MessageType::StartTransaction, CoordinatorPhase::Waiting) => {
                 self.phase = CoordinatorPhase::Voting;
+                self.last_prepare_time = Some(at_time);
                 outgoing.extend(self.nodes.iter().map(|&node| Message {
                     message_type: MessageType::Prepare,
                     from: ActorId::Coordinator,
@@ -172,7 +211,20 @@ impl StateMachine for Coordinator {
                 };
                 self.votes.insert(node, vote);
                 self.try_decide();
-                outgoing.extend(self.try_send_decision());
+                outgoing.extend(self.try_send_decision(at_time));
+            }
+            (MessageType::Ack, CoordinatorPhase::AwaitingAcks(d)) => {
+                let node = match msg.from {
+                    ActorId::Node(id) => id,
+                    _ => return outgoing,
+                };
+                self.acks.insert(node);
+                if self.acks.len() == self.nodes.len() {
+                    self.phase = CoordinatorPhase::Done(d);
+                }
+            }
+            (MessageType::Ack, CoordinatorPhase::Done(_)) => {
+                // Duplicate ack after protocol complete, ignore.
             }
             (msg_type, phase) => {
                 eprintln!("[Coordinator] Ignoring {msg_type:?} in {phase:?}");
@@ -182,14 +234,83 @@ impl StateMachine for Coordinator {
         outgoing
     }
 
-    fn tick(&mut self, _at_time: u64) -> Vec<Message> {
-        if let CoordinatorPhase::Voting = self.phase {
-            let prob = (self.config.abort_bias / 10.0).clamp(0.0, 1.0);
-            if prob > 0.0 && self.config.rng.random_bool(prob) {
-                self.phase = CoordinatorPhase::Decided(Decision::Abort);
+    fn tick(&mut self, at_time: u64) -> Vec<Message> {
+        match self.phase {
+            CoordinatorPhase::Voting => {
+                let prob = (self.config.abort_bias / 10.0).clamp(0.0, 1.0);
+                if prob > 0.0 && self.config.rng.random_bool(prob) {
+                    self.phase = CoordinatorPhase::Decided(Decision::Abort);
+                    return self.try_send_decision(at_time);
+                }
+                // Retransmit Prepare to nodes with no recorded vote.
+                if let Some(last_time) = self.last_prepare_time {
+                    if at_time.saturating_sub(last_time) >= self.config.retransmit_timeout {
+                        self.last_prepare_time = Some(at_time);
+                        return self
+                            .nodes
+                            .iter()
+                            .filter(|n| !self.votes.contains_key(n))
+                            .map(|&node| Message {
+                                message_type: MessageType::Prepare,
+                                from: ActorId::Coordinator,
+                                to: ActorId::Node(node),
+                            })
+                            .collect();
+                    }
+                }
+                vec![]
+            }
+            CoordinatorPhase::Decided(_) => self.try_send_decision(at_time),
+            CoordinatorPhase::AwaitingAcks(decision) => {
+                // Retransmit Decision to unacked nodes.
+                if let Some(last_time) = self.last_decision_time {
+                    if at_time.saturating_sub(last_time) >= self.config.retransmit_timeout {
+                        self.last_decision_time = Some(at_time);
+                        let message_type = match decision {
+                            Decision::Commit => MessageType::DecisionCommit,
+                            Decision::Abort => MessageType::DecisionAbort,
+                        };
+                        return self
+                            .nodes
+                            .iter()
+                            .filter(|n| !self.acks.contains(n))
+                            .map(|&node| Message {
+                                message_type,
+                                from: ActorId::Coordinator,
+                                to: ActorId::Node(node),
+                            })
+                            .collect();
+                    }
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn is_quiescent(&self) -> bool {
+        matches!(
+            self.phase,
+            CoordinatorPhase::Done(_) | CoordinatorPhase::Waiting
+        )
+    }
+
+    fn recover(&mut self, at_time: u64) {
+        match self.wal.decision {
+            Some(d) => {
+                self.phase = CoordinatorPhase::Decided(d);
+                self.acks.clear();
+                self.last_decision_time =
+                    Some(at_time.saturating_sub(self.config.retransmit_timeout));
+            }
+            None => {
+                self.phase = CoordinatorPhase::Voting;
+                self.votes.clear();
+                self.acks.clear();
+                self.last_prepare_time =
+                    Some(at_time.saturating_sub(self.config.retransmit_timeout));
             }
         }
-        self.try_send_decision()
     }
 }
 
@@ -203,7 +324,7 @@ mod tests {
 
     #[test]
     fn start_transaction_sends_prepare() {
-        let mut coord = Coordinator::new(two_nodes(), 0, 0.0);
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
         let start = Message {
             message_type: MessageType::StartTransaction,
             from: ActorId::Coordinator,
@@ -216,8 +337,8 @@ mod tests {
     }
 
     #[test]
-    fn all_commit_votes_without_abort_bias() {
-        let mut coord = Coordinator::new(two_nodes(), 0, 0.0);
+    fn all_commit_votes_enters_awaiting_acks() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
         coord.phase = CoordinatorPhase::Voting;
 
         let vote0 = Message {
@@ -234,7 +355,10 @@ mod tests {
             to: ActorId::Coordinator,
         };
         let msgs = coord.on_message(&vote1, 2);
-        assert_eq!(coord.phase(), CoordinatorPhase::Done(Decision::Commit));
+        assert_eq!(
+            coord.phase(),
+            CoordinatorPhase::AwaitingAcks(Decision::Commit)
+        );
         assert_eq!(coord.decision(), Some(Decision::Commit));
         assert_eq!(msgs.len(), 2);
         assert!(
@@ -244,8 +368,8 @@ mod tests {
     }
 
     #[test]
-    fn abort_vote_decides_abort() {
-        let mut coord = Coordinator::new(two_nodes(), 0, 0.0);
+    fn abort_vote_enters_awaiting_acks() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
         coord.phase = CoordinatorPhase::Voting;
 
         let vote = Message {
@@ -254,7 +378,10 @@ mod tests {
             to: ActorId::Coordinator,
         };
         let msgs = coord.on_message(&vote, 1);
-        assert_eq!(coord.phase(), CoordinatorPhase::Done(Decision::Abort));
+        assert_eq!(
+            coord.phase(),
+            CoordinatorPhase::AwaitingAcks(Decision::Abort)
+        );
         assert_eq!(coord.decision(), Some(Decision::Abort));
         assert_eq!(msgs.len(), 2);
         assert!(
@@ -265,15 +392,112 @@ mod tests {
 
     #[test]
     fn tick_decided_sends_decision_messages() {
-        let mut coord = Coordinator::new(two_nodes(), 0, 0.0);
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
         coord.phase = CoordinatorPhase::Decided(Decision::Commit);
 
         let msgs = coord.tick(0);
-        assert_eq!(coord.phase(), CoordinatorPhase::Done(Decision::Commit));
+        assert_eq!(
+            coord.phase(),
+            CoordinatorPhase::AwaitingAcks(Decision::Commit)
+        );
         assert_eq!(msgs.len(), 2);
         assert!(
             msgs.iter()
                 .all(|m| m.message_type == MessageType::DecisionCommit)
         );
+    }
+
+    #[test]
+    fn acks_complete_protocol() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
+        coord.phase = CoordinatorPhase::AwaitingAcks(Decision::Commit);
+        coord.last_decision_time = Some(0);
+
+        let ack0 = Message {
+            message_type: MessageType::Ack,
+            from: ActorId::Node(NodeId(0)),
+            to: ActorId::Coordinator,
+        };
+        coord.on_message(&ack0, 1);
+        assert_eq!(
+            coord.phase(),
+            CoordinatorPhase::AwaitingAcks(Decision::Commit)
+        );
+
+        let ack1 = Message {
+            message_type: MessageType::Ack,
+            from: ActorId::Node(NodeId(1)),
+            to: ActorId::Coordinator,
+        };
+        coord.on_message(&ack1, 2);
+        assert_eq!(coord.phase(), CoordinatorPhase::Done(Decision::Commit));
+    }
+
+    #[test]
+    fn retransmit_prepare_on_timeout() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
+        coord.phase = CoordinatorPhase::Voting;
+        coord.last_prepare_time = Some(0);
+
+        // Record one vote so only the other node gets retransmit.
+        coord.votes.insert(NodeId(0), Decision::Commit);
+
+        // Before timeout: no retransmit.
+        let msgs = coord.tick(4);
+        assert!(msgs.is_empty());
+
+        // At timeout: retransmit to unvoted node.
+        let msgs = coord.tick(5);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].to, ActorId::Node(NodeId(1)));
+        assert_eq!(msgs[0].message_type, MessageType::Prepare);
+    }
+
+    #[test]
+    fn retransmit_decision_on_timeout() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
+        coord.phase = CoordinatorPhase::AwaitingAcks(Decision::Commit);
+        coord.last_decision_time = Some(0);
+
+        // Record one ack.
+        coord.acks.insert(NodeId(0));
+
+        let msgs = coord.tick(4);
+        assert!(msgs.is_empty());
+
+        let msgs = coord.tick(5);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].to, ActorId::Node(NodeId(1)));
+        assert_eq!(msgs[0].message_type, MessageType::DecisionCommit);
+    }
+
+    #[test]
+    fn recover_with_decision() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
+        coord.wal.decision = Some(Decision::Commit);
+        coord.recover(10);
+        assert_eq!(coord.phase(), CoordinatorPhase::Decided(Decision::Commit));
+        assert!(coord.acks.is_empty());
+
+        // Next tick should send decisions.
+        let msgs = coord.tick(10);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            coord.phase(),
+            CoordinatorPhase::AwaitingAcks(Decision::Commit)
+        );
+    }
+
+    #[test]
+    fn recover_without_decision() {
+        let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
+        coord.recover(10);
+        assert_eq!(coord.phase(), CoordinatorPhase::Voting);
+        assert!(coord.votes.is_empty());
+
+        // Next tick should retransmit Prepare.
+        let msgs = coord.tick(10);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs.iter().all(|m| m.message_type == MessageType::Prepare));
     }
 }

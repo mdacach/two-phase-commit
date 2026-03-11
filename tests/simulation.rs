@@ -7,12 +7,15 @@ use two_phase_commit::types::*;
 
 // -- Event generation --
 
-fn actions_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+fn tick_actions_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(0..=10u8, 1..=max_len)
 }
 
-fn materialize_events(sim: &mut Simulator, tick_deltas: &[u8]) -> u64 {
-    // Always start with a single StartTransaction at time 0.
+fn crash_actions_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(0..=30u8, 1..=max_len)
+}
+
+fn materialize_tick_events(sim: &mut Simulator, tick_deltas: &[u8]) -> u64 {
     sim.enqueue_external(ExternalEvent::StartTransaction, 0);
 
     let mut time: u64 = 0;
@@ -23,7 +26,37 @@ fn materialize_events(sim: &mut Simulator, tick_deltas: &[u8]) -> u64 {
     time
 }
 
-// -- Property-based tests --
+fn materialize_crash_events(sim: &mut Simulator, actions: &[u8], n_participants: u8) -> u64 {
+    sim.enqueue_external(ExternalEvent::StartTransaction, 0);
+
+    let mut time: u64 = 0;
+    for &action in actions {
+        time += 1;
+        match action {
+            0..=20 => {
+                sim.enqueue_external(ExternalEvent::TickAll, time);
+            }
+            21..=24 => {
+                let node = NodeId((action - 21) % n_participants);
+                sim.enqueue_external(ExternalEvent::Crash(ActorId::Node(node)), time);
+            }
+            25..=28 => {
+                let node = NodeId((action - 25) % n_participants);
+                sim.enqueue_external(ExternalEvent::Recover(ActorId::Node(node)), time);
+            }
+            29 => {
+                sim.enqueue_external(ExternalEvent::Crash(ActorId::Coordinator), time);
+            }
+            30 => {
+                sim.enqueue_external(ExternalEvent::Recover(ActorId::Coordinator), time);
+            }
+            _ => unreachable!(),
+        }
+    }
+    time
+}
+
+// -- Property-based tests (no crashes) --
 
 #[property_test]
 fn test_safety(
@@ -31,13 +64,12 @@ fn test_safety(
     seed: u64,
     #[strategy = (0..=200u32).prop_map(|x| x as f64 / 1000.0)] abort_bias: f64,
     #[strategy = 0..=10u64] delivery_delay: u64,
-    #[strategy = actions_strategy(30)] tick_deltas: Vec<u8>,
+    #[strategy = tick_actions_strategy(30)] tick_deltas: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay);
-    let last_time = materialize_events(&mut sim, &tick_deltas);
+    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay, 5);
+    let last_time = materialize_tick_events(&mut sim, &tick_deltas);
 
     sim.run();
-    // Drain remaining events to let the protocol settle.
     sim.drain(last_time as usize + 50);
 
     // step() checks invariants internally — panics on violation
@@ -49,12 +81,10 @@ fn test_termination(
     #[strategy = 1..=4u8] n_participants: u8,
     seed: u64,
     #[strategy = 0..=10u64] delivery_delay: u64,
-    #[strategy = actions_strategy(30)] tick_deltas: Vec<u8>,
+    #[strategy = tick_actions_strategy(30)] tick_deltas: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    // No abort bias — ensures coordinator always commits or aborts based on votes,
-    // never spontaneously aborts (which could fire before StartTransaction is delivered).
-    let mut sim = Simulator::new(n_participants, seed, 0.0, 0..delivery_delay);
-    let last_time = materialize_events(&mut sim, &tick_deltas);
+    let mut sim = Simulator::new(n_participants, seed, 0.0, 0..delivery_delay, 5);
+    let last_time = materialize_tick_events(&mut sim, &tick_deltas);
 
     sim.run();
     sim.drain(last_time as usize + 100);
@@ -69,6 +99,59 @@ fn test_termination(
     Ok(())
 }
 
+// -- Property-based tests (with crashes) --
+
+#[property_test]
+fn test_safety_with_crashes(
+    #[strategy = 1..=4u8] n_participants: u8,
+    seed: u64,
+    #[strategy = (0..=200u32).prop_map(|x| x as f64 / 1000.0)] abort_bias: f64,
+    #[strategy = 0..=10u64] delivery_delay: u64,
+    #[strategy = crash_actions_strategy(40)] actions: Vec<u8>,
+) -> Result<(), TestCaseError> {
+    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay, 5);
+    materialize_crash_events(&mut sim, &actions, n_participants);
+
+    sim.run();
+    sim.drain(200);
+
+    // step() checks invariants internally — panics on violation.
+    // With permanent crashes, some nodes may never decide — that's fine for safety.
+    Ok(())
+}
+
+#[property_test]
+fn test_termination_with_crashes(
+    #[strategy = 1..=4u8] n_participants: u8,
+    seed: u64,
+    #[strategy = 0..=10u64] delivery_delay: u64,
+    #[strategy = crash_actions_strategy(40)] actions: Vec<u8>,
+) -> Result<(), TestCaseError> {
+    let mut sim = Simulator::new(n_participants, seed, 0.0, 0..delivery_delay, 5);
+    let mut time = materialize_crash_events(&mut sim, &actions, n_participants);
+
+    // Recovery sweep: recover all actors, then drain until quiescent.
+    time += 1;
+    sim.enqueue_external(ExternalEvent::Recover(ActorId::Coordinator), time);
+    for i in 0..n_participants {
+        time += 1;
+        sim.enqueue_external(ExternalEvent::Recover(ActorId::Node(NodeId(i))), time);
+    }
+
+    sim.run();
+    sim.drain(time as usize + 200);
+
+    prop_assert!(
+        properties::all_decided(sim.participants()),
+        "Termination violated after crash recovery: not all participants decided.\n  Coordinator: {:?}, phase: {:?}\n  Log:\n{}",
+        sim.coordinator().decision(),
+        sim.coordinator().phase(),
+        sim.format_log(),
+    );
+
+    Ok(())
+}
+
 // -- Deterministic edge-case tests --
 
 /// Drive the protocol to completion with fixed votes using a simple message queue.
@@ -78,7 +161,7 @@ fn manual_protocol(votes: &[Decision], abort_bias: f64) {
     use two_phase_commit::state_machine::StateMachine;
 
     let nodes: Vec<NodeId> = (0..votes.len() as u8).map(NodeId).collect();
-    let mut coord = Coordinator::new(nodes.clone(), 0, abort_bias);
+    let mut coord = Coordinator::new(nodes.clone(), 0, abort_bias, 5);
 
     let mut participants: Vec<Participant> = votes
         .iter()

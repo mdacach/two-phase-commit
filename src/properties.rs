@@ -50,8 +50,9 @@ pub fn check_agreement(participants: &BTreeMap<NodeId, Participant>) -> Result<(
 
 /// AC2 (commit direction) + abort-safety (abort direction).
 ///
-/// - **Commit**: coordinator committed → all votes are Commit and all votes
-///   are in. Corresponds to TLA+ `Consistency`.
+/// - **Commit**: coordinator committed → all votes are Commit. Checked via the
+///   coordinator's vote map (if available — it is cleared on recovery) and via
+///   participants' own vote records. Corresponds to TLA+ `Consistency`.
 /// - **Abort**: coordinator aborted → no participant has committed.
 pub fn check_validity(
     coordinator: &Coordinator,
@@ -59,17 +60,29 @@ pub fn check_validity(
 ) -> Result<(), String> {
     match coordinator.decision() {
         Some(Decision::Commit) => {
-            if coordinator.votes().len() != coordinator.nodes().len() {
-                return Err(format!(
-                    "Validity violated: coordinator committed with {}/{} votes",
-                    coordinator.votes().len(),
-                    coordinator.nodes().len()
-                ));
-            }
-            for (id, vote) in coordinator.votes() {
-                if *vote != Decision::Commit {
+            // Check coordinator's vote records if available (may be cleared by recovery).
+            let votes = coordinator.votes();
+            if !votes.is_empty() {
+                if votes.len() != coordinator.nodes().len() {
                     return Err(format!(
-                        "Validity violated: coordinator committed but {id} voted {vote:?}"
+                        "Validity violated: coordinator committed with {}/{} votes",
+                        votes.len(),
+                        coordinator.nodes().len()
+                    ));
+                }
+                for (id, vote) in votes {
+                    if *vote != Decision::Commit {
+                        return Err(format!(
+                            "Validity violated: coordinator committed but {id} voted {vote:?}"
+                        ));
+                    }
+                }
+            }
+            // Always check participants' own vote records.
+            for (id, p) in participants {
+                if p.vote() == Some(Decision::Abort) {
+                    return Err(format!(
+                        "Validity violated: coordinator committed but participant {id} voted Abort"
                     ));
                 }
             }

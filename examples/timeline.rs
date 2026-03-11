@@ -5,7 +5,7 @@ use two_phase_commit::simulator::{ExternalEvent, Simulator};
 fn run_scenario(label: &str, n_participants: u8, seed: u64, abort_bias: f64, delivery_delay: u64) {
     println!("=== {label} ===\n");
 
-    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay);
+    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay, 5);
     sim.enqueue_external(ExternalEvent::StartTransaction, 0);
     sim.run();
     sim.drain(50);

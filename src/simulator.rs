@@ -13,6 +13,12 @@
 //!    `delivery_delay`.
 //! 5. Safety invariants are checked (panics on violation).
 //!
+//! ## Crashes
+//!
+//! The simulator tracks which actors are alive. `Crash(id)` marks an actor as
+//! dead; `Recover(id)` calls `actor.recover()` and marks it alive. Messages
+//! delivered to dead actors are dropped and logged as `LogEntry::Drop`.
+//!
 //! ## Quiescence
 //!
 //! After all external events have been processed, [`drain`](Simulator::drain)
@@ -39,11 +45,10 @@ use crate::types::*;
 pub use event::ExternalEvent;
 use event::{Event, InternalEvent};
 
-// REVIEW: Make it so the delivery delay range contains 1, and instead messages arrive at clock + delivery_delay.
-//         Will need to update documentation too.
 pub struct Simulator {
     coordinator: Coordinator,
     participants: BTreeMap<NodeId, Participant>,
+    alive: BTreeMap<ActorId, bool>,
     event_queue: event::EventQueue,
     clock: u64,
     rng: ChaCha8Rng,
@@ -55,29 +60,43 @@ pub struct Simulator {
 }
 
 impl Simulator {
-    pub fn new(n_participants: u8, seed: u64, abort_bias: f64, delivery_delay: Range<u64>) -> Self {
+    pub fn new(
+        n_participants: u8,
+        seed: u64,
+        abort_bias: f64,
+        delivery_delay: Range<u64>,
+        retransmit_timeout: u64,
+    ) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
         let nodes: Vec<NodeId> = (0..n_participants).map(NodeId).collect();
 
         let seed: u64 = rng.random();
-        let coordinator = Coordinator::new(nodes.clone(), seed, abort_bias);
+        let coordinator = Coordinator::new(nodes.clone(), seed, abort_bias, retransmit_timeout);
 
         let mut participants = BTreeMap::new();
+        let mut alive = BTreeMap::new();
+        alive.insert(ActorId::Coordinator, true);
         for &node_id in &nodes {
             let seed: u64 = rng.random();
             participants.insert(node_id, Participant::new(node_id, seed, 0.2));
+            alive.insert(ActorId::Node(node_id), true);
         }
 
         Self {
             coordinator,
             participants,
+            alive,
             event_queue: event::EventQueue::new(),
             clock: 0,
             rng,
             delivery_delay,
             action_log: Vec::new(),
         }
+    }
+
+    fn is_alive(&self, actor: ActorId) -> bool {
+        self.alive.get(&actor).copied().unwrap_or(true)
     }
 
     pub fn enqueue_external(&mut self, event: ExternalEvent, at_time: u64) {
@@ -114,6 +133,17 @@ impl Simulator {
 
         self.clock = timestamp;
 
+        // Drop messages to dead actors early.
+        if let Event::Internal(InternalEvent::Deliver { ref msg, .. }) = ev {
+            if !self.is_alive(msg.to) {
+                self.action_log.push(LogEntry::Drop {
+                    at: self.clock,
+                    msg: msg.clone(),
+                });
+                return true;
+            }
+        }
+
         let outgoing = match ev {
             Event::External(ref ext) => {
                 self.action_log.push(LogEntry::ExternalEvent {
@@ -129,23 +159,56 @@ impl Simulator {
                         };
                         self.coordinator.on_message(&msg, self.clock)
                     }
-                    ExternalEvent::Tick { to } => match to {
-                        ActorId::Coordinator => self.coordinator.tick(self.clock),
-                        ActorId::Node(id) => self
-                            .participants
-                            .get_mut(id)
-                            .map(|p| p.tick(self.clock))
-                            .unwrap_or_default(),
-                    },
+                    ExternalEvent::Tick { to } => {
+                        if !self.is_alive(*to) {
+                            vec![]
+                        } else {
+                            match to {
+                                ActorId::Coordinator => self.coordinator.tick(self.clock),
+                                ActorId::Node(id) => self
+                                    .participants
+                                    .get_mut(id)
+                                    .map(|p| p.tick(self.clock))
+                                    .unwrap_or_default(),
+                            }
+                        }
+                    }
                     ExternalEvent::TickAll => {
-                        let mut out = self.coordinator.tick(self.clock);
+                        let mut out = if self.is_alive(ActorId::Coordinator) {
+                            self.coordinator.tick(self.clock)
+                        } else {
+                            vec![]
+                        };
                         let node_ids: Vec<NodeId> = self.participants.keys().copied().collect();
                         for id in node_ids {
-                            if let Some(p) = self.participants.get_mut(&id) {
-                                out.extend(p.tick(self.clock));
+                            if self.is_alive(ActorId::Node(id)) {
+                                if let Some(p) = self.participants.get_mut(&id) {
+                                    out.extend(p.tick(self.clock));
+                                }
                             }
                         }
                         out
+                    }
+                    ExternalEvent::Crash(actor_id) => {
+                        self.alive.insert(*actor_id, false);
+                        vec![]
+                    }
+                    ExternalEvent::Recover(actor_id) => {
+                        let was_dead = !self.is_alive(*actor_id);
+                        self.alive.insert(*actor_id, true);
+                        if was_dead {
+                            match actor_id {
+                                ActorId::Coordinator => {
+                                    self.coordinator.recover(self.clock);
+                                }
+                                ActorId::Node(id) => {
+                                    if let Some(p) = self.participants.get_mut(id) {
+                                        p.recover(self.clock);
+                                    }
+                                }
+                            }
+                        }
+                        vec![]
                     }
                 }
             }
@@ -169,11 +232,12 @@ impl Simulator {
 
         if let Err(e) = properties::check_all_invariants(&self.coordinator, &self.participants) {
             panic!(
-                "Invariant violation at clock={}: {e}\n  coordinator: phase={:?}, decision={:?}, votes={:?}",
+                "Invariant violation at clock={}: {e}\n  coordinator: phase={:?}, decision={:?}, votes={:?}\n  log:\n{}",
                 self.clock,
                 self.coordinator.phase(),
                 self.coordinator.decision(),
                 self.coordinator.votes(),
+                self.format_log(),
             );
         }
 
@@ -185,19 +249,55 @@ impl Simulator {
         while self.step() {}
     }
 
-    /// Drain the event queue by ticking all actors until no new events are produced,
-    /// up to `max_rounds` steps. Returns whether the system is quiescent.
+    /// Returns `true` if every alive actor reports [`StateMachine::is_quiescent`].
+    pub fn is_quiescent(&self) -> bool {
+        if self.is_alive(ActorId::Coordinator) && !self.coordinator.is_quiescent() {
+            return false;
+        }
+        for (&id, p) in &self.participants {
+            if self.is_alive(ActorId::Node(id)) && !p.is_quiescent() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Drain the event queue by ticking all actors until no new events are
+    /// produced for several consecutive rounds, up to `max_rounds` steps.
+    /// Returns whether the system is quiescent.
+    ///
+    /// If all alive actors report [`is_quiescent`](Self::is_quiescent) and the
+    /// event queue is empty, returns immediately without tick-probing.
+    /// Otherwise, multiple consecutive empty ticks are required before
+    /// declaring quiescence, since actors with retransmit timeouts may produce
+    /// messages only after enough time has elapsed.
     pub fn drain(&mut self, max_rounds: usize) -> bool {
+        const QUIESCENCE_THRESHOLD: usize = 12;
+        let mut consecutive_empty: usize = 0;
+
         for _ in 0..max_rounds {
             if self.step() {
+                consecutive_empty = 0;
+                // Check for early exit after processing an event.
+                if self.event_queue.is_empty() && self.is_quiescent() {
+                    return true;
+                }
                 continue;
             }
-            // Queue is empty — inject a TickAll probe to check for quiescence.
+            // Queue is empty — check logical quiescence before tick-probing.
+            if self.is_quiescent() {
+                return true;
+            }
+            // Inject a TickAll probe.
             self.clock += 1;
             self.enqueue_external(ExternalEvent::TickAll, self.clock);
             self.step(); // processes TickAll with invariant checking
-            // If nothing new was enqueued, we're quiescent.
-            if !self.step() {
+            if self.step() {
+                consecutive_empty = 0;
+                continue;
+            }
+            consecutive_empty += 1;
+            if consecutive_empty >= QUIESCENCE_THRESHOLD {
                 return true;
             }
         }
@@ -239,6 +339,8 @@ pub enum LogEntry {
         deliver_at: u64,
         msg: Message,
     },
+    /// A message was dropped because the recipient was dead.
+    Drop { at: u64, msg: Message },
 }
 
 impl fmt::Display for LogEntry {
@@ -262,6 +364,13 @@ impl fmt::Display for LogEntry {
                 write!(
                     f,
                     "t={at:<4} [Send]    {} → {}: {:?} (deliver@{deliver_at})",
+                    msg.from, msg.to, msg.message_type,
+                )
+            }
+            LogEntry::Drop { at, msg } => {
+                write!(
+                    f,
+                    "t={at:<4} [Drop]    {} → {}: {:?}",
                     msg.from, msg.to, msg.message_type,
                 )
             }

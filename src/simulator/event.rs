@@ -20,6 +20,8 @@ pub enum ExternalEvent {
     StartTransaction,
     Tick { to: ActorId },
     TickAll,
+    Crash(ActorId),
+    Recover(ActorId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,10 @@ impl EventQueue {
             sequence_number: seq,
             event,
         });
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queue.is_empty()
     }
 
     pub(crate) fn next(&mut self) -> Option<(u64, Event)> {
