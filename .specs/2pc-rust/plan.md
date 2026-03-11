@@ -253,11 +253,11 @@ Key observations:
 **Checkpoint:** `cargo check` passes; types compile.
 
 ### Tasks
-- [ ] Initialize Cargo project (`cargo init --lib`)
-- [ ] Add dependencies:
+- [x] Initialize Cargo project (`cargo init --lib`)
+- [x] Add dependencies:
   - `proptest` (with `features = ["attr-macro"]`)
   - `rand` + `rand_chacha` (for `ChaCha8Rng`)
-- [ ] Define core types in `src/types.rs`:
+- [x] Define core types in `src/types.rs`:
   - `NodeId` — newtype over `u8`, derive `Copy`, `Ord`, `Hash`, `Debug`
   - `Phase` enum: `Waiting`, `Voting`, `Decided`, `Done`
   - `Decision` enum: `Commit`, `Abort`
@@ -266,14 +266,14 @@ Key observations:
     — derive `Clone`, `Debug`, `Eq`, `PartialEq`
   - `MessageType` enum: `StartTransaction`, `Prepare`, `VoteCommit`, `VoteAbort`,
     `DecCommit`, `DecAbort`
-- [ ] Define `StateMachine` trait in `src/state_machine.rs`:
+- [x] Define `StateMachine` trait in `src/state_machine.rs`:
   ```rust
   pub trait StateMachine {
       fn on_message(&mut self, msg: &Message, at_time: u64) -> Vec<Message>;
       fn tick(&mut self, _at_time: u64) -> Vec<Message> { vec![] }
   }
   ```
-- [ ] Set up `src/lib.rs` with module declarations
+- [x] Set up `src/lib.rs` with module declarations
 
 ### Files to Create
 - `Cargo.toml`
@@ -294,35 +294,35 @@ Key observations:
 ### Tasks
 
 #### Coordinator (`src/coordinator.rs`)
-- [ ] Define `Coordinator` struct with fields per Actor Details above
-- [ ] `Coordinator::new(nodes: Vec<NodeId>, rng_seed: u64, abort_bias: f64)`
-- [ ] Implement `StateMachine::on_message`:
+- [x] Define `Coordinator` struct with fields per Actor Details above
+- [x] `Coordinator::new(nodes: Vec<NodeId>, rng_seed: u64, abort_bias: f64)`
+- [x] Implement `StateMachine::on_message`:
   - StartTransaction → send Prepare to all, phase → Voting
   - VoteCommit/VoteAbort → record in `votes` map, call `try_decide()`
-- [ ] Implement `try_decide()`:
+- [x] Implement `try_decide()`:
   - Any abort vote → decide Abort
   - All commit votes → decide Commit (prob 1-abort_bias) or Abort (prob abort_bias)
   - Otherwise → no decision
-- [ ] Implement `StateMachine::tick`:
+- [x] Implement `StateMachine::tick`:
   - Voting → spontaneous Abort (prob abort_bias/10)
   - Decided → send DecCommit/DecAbort to all, phase → Done
-- [ ] Add accessor methods: `phase()`, `decision()`, `votes()`, `nodes()`
-- [ ] Smoke tests:
+- [x] Add accessor methods: `phase()`, `decision()`, `votes()`, `nodes()`
+- [x] Smoke tests:
   - Receive StartTransaction → produces Prepare messages, transitions to Voting
   - Receive all commit votes → decides Commit
   - Receive any abort vote → decides Abort
 
 #### Participant (`src/participant.rs`)
-- [ ] Define `ParticipantPhase` enum: `Waiting`, `Voted`, `Decided(Decision)`
-- [ ] Define `Participant` struct with fields per Actor Details above
-- [ ] `Participant::new(id: NodeId, rng_seed: u64)`
-- [ ] `Participant::with_fixed_vote(id: NodeId, vote: Decision)` — for edge-case tests
-- [ ] Implement `StateMachine::on_message`:
+- [x] Define `ParticipantPhase` enum: `Waiting`, `Voted`, `Decided(Decision)`
+- [x] Define `Participant` struct with fields per Actor Details above
+- [x] `Participant::new(id: NodeId, rng_seed: u64)`
+- [x] `Participant::with_fixed_vote(id: NodeId, vote: Decision)` — for edge-case tests
+- [x] Implement `StateMachine::on_message`:
   - Prepare (Waiting) → draw vote from RNG, send VoteCommit/VoteAbort, phase → Voted
   - DecCommit (Voted) → phase → Decided(Commit)
   - DecAbort (Voted) → phase → Decided(Abort)
-- [ ] Add accessor methods: `phase()`, `vote()`, `decision()`, `has_voted()`
-- [ ] Smoke tests:
+- [x] Add accessor methods: `phase()`, `vote()`, `decision()`, `has_voted()`
+- [x] Smoke tests:
   - Receive Prepare → sends vote message to coordinator
   - Receive DecCommit/DecAbort → records decision
 
@@ -346,35 +346,35 @@ Key observations:
 ### Tasks
 
 #### Event Queue (`src/simulator/event.rs`)
-- [ ] Define `ExternalEvent` enum: `StartTransaction`, `Tick { to: ActorId }`, `TickAll`
-- [ ] Define `InternalEvent` enum: `Deliver { to: ActorId, msg: Message }`
-- [ ] Define `Event` enum: `External(ExternalEvent)`, `Internal(InternalEvent)`
-- [ ] Define `TimestampedEvent` struct: `timestamp: u64`, `sequence_number: u64`,
+- [x] Define `ExternalEvent` enum: `StartTransaction`, `Tick { to: ActorId }`, `TickAll`
+- [x] Define `InternalEvent` enum: `Deliver { to: ActorId, msg: Message }`
+- [x] Define `Event` enum: `External(ExternalEvent)`, `Internal(InternalEvent)`
+- [x] Define `TimestampedEvent` struct: `timestamp: u64`, `sequence_number: u64`,
   `event: Event` — with reversed `Ord` for min-heap via `BinaryHeap`
-- [ ] Define `EventQueue` struct: `BinaryHeap<TimestampedEvent>`,
+- [x] Define `EventQueue` struct: `BinaryHeap<TimestampedEvent>`,
   `next_sequence_number: u64`
   - `insert(timestamp, event)` — auto-assigns sequence number
   - `next() -> Option<(u64, Event)>` — pops earliest event
 
 #### Simulator (`src/simulator.rs`)
-- [ ] Define `Simulator` struct:
+- [x] Define `Simulator` struct:
   - `coordinator: Coordinator`
   - `participants: BTreeMap<NodeId, Participant>`
   - `event_queue: EventQueue`
   - `clock: u64`
   - `rng: ChaCha8Rng`
   - `jitter_range: u64`
-- [ ] `Simulator::new(n_participants, seed, abort_bias, jitter_range)`:
+- [x] `Simulator::new(n_participants, seed, abort_bias, jitter_range)`:
   - Derive per-actor RNG seeds from master seed
   - Create coordinator and participants
-- [ ] `enqueue_external(event, at_time)` — insert external event into queue
-- [ ] `enqueue_outgoing(messages)` — for each outgoing message, insert internal
+- [x] `enqueue_external(event, at_time)` — insert external event into queue
+- [x] `enqueue_outgoing(messages)` — for each outgoing message, insert internal
   `Deliver` event with timestamp = `clock + 1 + rng.gen_range(0..jitter_range)`
-- [ ] `deliver(to, msg) -> Vec<Message>`:
+- [x] `deliver(to, msg) -> Vec<Message>`:
   - Call `actor.tick(clock)`, collect outgoing
   - Call `actor.on_message(&msg, clock)`, collect outgoing
   - Return all outgoing
-- [ ] `step() -> bool`:
+- [x] `step() -> bool`:
   - Pop next event from queue; if empty, return false
   - Advance clock to event timestamp
   - Match on event type:
@@ -385,19 +385,19 @@ Key observations:
     - `Internal(Deliver { to, msg })` → call `deliver(to, msg)`, enqueue outgoing
   - Check invariants
   - Return true
-- [ ] `run()` — loop `step()` until it returns false
+- [x] `run()` — loop `step()` until it returns false
 
 #### Properties (`src/properties.rs`)
-- [ ] `check_agreement(participants) -> Result<(), String>`:
+- [x] `check_agreement(participants) -> Result<(), String>`:
   - Among decided participants, all committed or all aborted
-- [ ] `check_validity_commit(coordinator, participants) -> Result<(), String>`:
+- [x] `check_validity_commit(coordinator, participants) -> Result<(), String>`:
   - If coordinator decided Commit, then all votes in coordinator.votes() are Commit
     and votes.len() == nodes.len()
-- [ ] `check_validity_abort(coordinator, participants) -> Result<(), String>`:
+- [x] `check_validity_abort(coordinator, participants) -> Result<(), String>`:
   - If coordinator decided Abort, no participant has committed
-- [ ] `check_all_invariants(coordinator, participants) -> Result<(), String>`:
+- [x] `check_all_invariants(coordinator, participants) -> Result<(), String>`:
   - Calls all three checks; combines errors
-- [ ] `is_terminated(participants) -> bool`:
+- [x] `is_terminated(participants) -> bool`:
   - All participants have decided
 
 ### Files to Create
@@ -421,31 +421,31 @@ Key observations:
 ### Tasks
 
 #### proptest Strategies (`tests/simulation.rs`)
-- [ ] Define `GenerateEvent` enum: `StartTransaction`, `TickAll`
-- [ ] `event_strategy()` — weighted: StartTransaction (1), TickAll (5)
-- [ ] `actions_strategy(max_len)` — `Vec<(GenerateEvent, u8)>` where `u8` is time delta
-- [ ] `materialize_events(sim, actions)` — accumulate deltas into monotonic timestamps,
+- [x] Define `GenerateEvent` enum: `StartTransaction`, `TickAll`
+- [x] `event_strategy()` — weighted: StartTransaction (1), TickAll (5)
+- [x] `actions_strategy(max_len)` — `Vec<(GenerateEvent, u8)>` where `u8` is time delta
+- [x] `materialize_events(sim, actions)` — accumulate deltas into monotonic timestamps,
   enqueue as external events. Returns the final timestamp.
-- [ ] `append_tick_tail(sim, after_time, count)` — append `count` TickAll events after
+- [x] `append_tick_tail(sim, after_time, count)` — append `count` TickAll events after
   the generated events, spaced 1 apart.
 
 #### Property Tests
-- [ ] `test_safety`:
+- [x] `test_safety`:
   - Strategy: `n_participants` (1..=4), `seed` (u64), `abort_bias` (0..=200u32 mapped
     to 0.0..0.2), `jitter_range` (0..=10), `actions` (actions_strategy(30))
   - Setup simulator, materialize events, append tick tail (20)
   - Run step-by-step; invariants checked internally by simulator
   - `prop_assert!` succeeds if no panic
-- [ ] `test_termination`:
+- [x] `test_termination`:
   - Same strategy but with generous tick tail (50)
   - After simulation, `prop_assert!(is_terminated(participants))`
 
 #### Deterministic Edge-Case Tests
-- [ ] All-commit: both participants have fixed commit votes, abort_bias=0 →
+- [x] All-commit: both participants have fixed commit votes, abort_bias=0 →
   coordinator commits, both participants commit
-- [ ] One-abort: one participant has fixed abort vote → coordinator aborts, both abort
-- [ ] Coordinator abort despite all commits: abort_bias=1.0 → coordinator aborts
-- [ ] Single participant: n=1, works correctly
+- [x] One-abort: one participant has fixed abort vote → coordinator aborts, both abort
+- [x] Coordinator abort despite all commits: abort_bias=1.0 → coordinator aborts
+- [x] Single participant: n=1, works correctly
 
 ### Files to Create
 - `tests/simulation.rs`

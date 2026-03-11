@@ -82,3 +82,38 @@ in Waiting/Done; participants: always quiescent) — the runtime analog of TLA+ 
 
 Sources: FoundationDB paper (SIGMOD 2021), Polar Signals DST blog, Dijkstra-Safra termination
 detection, Segala (quiescence/fairness/testing).
+
+## Crash Recovery Reviews
+
+### coordinator.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 21 | 74 | Move recorded votes and acks into Wal | **Disagree.** Votes and acks are volatile state that is intentionally lost on crash — the coordinator re-collects them via retransmission. Moving them into the WAL would change the recovery semantics: the coordinator would "remember" votes/acks from before the crash, which is incorrect. The WAL should only contain the durable decision. The current separation (WAL = durable, struct fields = volatile) correctly models the crash boundary. | Skipped |
+| 22 | 84 | Move last_prepare_time and last_decision_time to relevant CoordinatorPhase | **Agree.** These timestamps are phase-specific: `last_prepare_time` is only meaningful in `Voting`, `last_decision_time` only in `AwaitingAcks`. Embedding them in the enum variants eliminates stale `Option` values and makes illegal states unrepresentable. `Voting { last_prepare_time: u64 }` and `AwaitingAcks { decision: Decision, last_decision_time: u64 }`. | Fixed |
+| 23 | 243 | Do we need the prob > 0 check? | **Agree — it's redundant.** `random_bool(0.0)` always returns false (Bernoulli with p_int=0). The `prob > 0.0` guard is pure optimization/documentation. Removing it simplifies without changing behavior. | Fixed |
+| 24 | 290 | Log if ignoring in tick catch-all | **Disagree.** Unlike `on_message`'s catch-all (which fires on genuinely unexpected messages), the tick catch-all only covers `Waiting` and `Done` — normal quiescent states hit by every `TickAll`. Logging here would be extremely noisy without diagnostic value. | Skipped |
+| 25 | 295 | Add documentation to is_quiescent | **Agree.** Trait method has a doc comment but the impl should clarify the coordinator-specific semantics. | Fixed |
+| 26 | 303 | Add documentation to recover | **Agree.** The module-level doc covers recovery, but the method itself deserves a summary and explanation of the `saturating_sub` trick. | Fixed |
+| 27 | 309 | Why this specific last_decision_time? | Documentation issue — answered in the doc comment for `recover()`. The value `at_time - retransmit_timeout` ensures the retransmit check (`elapsed >= timeout`) passes on the very next tick, triggering immediate retransmission after recovery. | Fixed |
+| 28 | 324 | Move tests to another file | **Agree.** Unit tests for coordinator and participant have grown large enough to warrant separate files. Moves tests to `coordinator/tests.rs` and `participant/tests.rs` while keeping them in `mod tests` (same visibility). | Fixed |
+
+### participant.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 29 | 164 | Explain why duplicate Prepare re-send is needed | **Agree.** The comment says "Duplicate Prepare while already voted: re-send vote" but doesn't explain *why*. After a coordinator crash and recovery (WAL has no decision), it re-enters Voting with cleared votes and retransmits Prepare. Participants that already voted receive a duplicate Prepare and must re-send their vote so the coordinator can re-collect votes and decide. | Fixed |
+| 30 | 188 | Similarly, explain why duplicate Decision re-send Ack is needed | **Agree.** After coordinator crash and recovery (WAL has decision), it re-enters Decided, transitions to AwaitingAcks, and retransmits Decision. Participants that already decided receive a duplicate Decision and must re-send Ack so the coordinator can complete the protocol. | Fixed |
+| 31 | 226 | Move tests to another file | **Agree.** Same as #28. | Fixed |
+
+### state_machine.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 32 | 23 | Consider whether recover() and is_quiescent() belong in StateMachine | **Agree — they belong here.** Both are universal actor concerns: every actor needs crash recovery semantics, and every actor has a quiescence state. The alternatives (separate traits, downcasting, or simulator-level dispatch) all add complexity without benefit. The trait already has `tick` which is similarly simulator-oriented. The default implementations (no-op recover, non-quiescent) are safe conservative defaults. Removing the REVIEW comment is sufficient. | Fixed |
+
+### lib.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 33 | 30 | Update documentation to reflect Alloy specification | **Agree.** The crate doc only mentions TLA+, but there's a complete Alloy spec at `alloy/TwoPhaseCommit.als`. Should add a parallel correspondence table and note the Alloy model's distinguishing features (ever-growing message network, nondeterministic coordinator abort, weak fairness on vote reception). | Fixed |

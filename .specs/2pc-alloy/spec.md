@@ -1,8 +1,8 @@
 # Specification: 2pc-alloy
 
-**Status:** Ready
+**Status:** Implemented
 **Created:** 2026-03-04
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-03-11
 
 ## Context
 A TLA+ specification for two-phase commit already exists, and now we want to create a

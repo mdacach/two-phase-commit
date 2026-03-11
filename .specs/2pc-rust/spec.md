@@ -1,8 +1,15 @@
 # Specification: 2pc-rust
 
-**Status:** Planned
+> **Superseded.** This spec covers the no-failure baseline only. Crash recovery
+> (WAL, retransmission, `Ack`, `Crash`/`Recover` events) is implemented but not
+> reflected here. The authoritative documentation for the current implementation
+> is the module-level rustdoc in `src/coordinator.rs`, `src/participant.rs`,
+> `src/simulator.rs`, and `src/state_machine.rs`. See also
+> `.specs/2pc-crash-recovery/spec.md` for the crash recovery specification.
+
+**Status:** Implemented (no-failure baseline)
 **Created:** 2026-03-09
-**Last Updated:** 2026-03-09
+**Last Updated:** 2026-03-11
 
 ## Context
 TLA+ and Alloy specifications for two-phase commit (no-failure model) already exist. This
@@ -14,9 +21,9 @@ We need an executable implementation that faithfully implements the protocol des
 (Agreement, Validity, Termination) the Alloy spec verifies.
 
 ## Goals
-- [ ] Implement the 2PC protocol as pure state-machine logic in Rust.
-- [ ] Build a deterministic simulation harness that explores protocol interleavings.
-- [ ] Verify Agreement, Validity, and Termination via property-based testing.
+- [x] Implement the 2PC protocol as pure state-machine logic in Rust.
+- [x] Build a deterministic simulation harness that explores protocol interleavings.
+- [x] Verify Agreement, Validity, and Termination via property-based testing.
 
 ## Non-Goals
 - No real networking or async runtime (simulation only).
@@ -138,11 +145,11 @@ Property-based tests with `proptest`, following the event-generation approach fr
 | Single participant | Protocol completes correctly |
 
 ## Acceptance Criteria
-- [ ] All 6 Alloy events implemented as state machine methods
-- [ ] Simulation runs complete protocol traces to termination
-- [ ] Agreement and Validity hold at every step of every simulated trace
-- [ ] proptest finds no violations across many random seeds
-- [ ] *(Optional)* Termination holds for all fair traces
+- [x] All 6 Alloy events implemented as state machine methods
+- [x] Simulation runs complete protocol traces to termination
+- [x] Agreement and Validity hold at every step of every simulated trace
+- [x] proptest finds no violations across many random seeds
+- [x] Termination holds for all fair traces
 
 Unit tests kept to a minimum — property-based tests provide the primary coverage.
 
