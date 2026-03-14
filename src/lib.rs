@@ -1,5 +1,6 @@
 //! A simulation of the Two-Phase Commit (2PC) protocol, developed alongside a
-//! TLA+ specification (`tla/TwoPhaseCommit.tla`).
+//! TLA+ specification (`tla/TwoPhaseCommit.tla`) and an Alloy specification
+//! (`alloy/TwoPhaseCommit.als`).
 //!
 //! # Architecture
 //!
@@ -9,25 +10,26 @@
 //! drives them through an event queue with configurable delivery delay, checking
 //! [safety invariants](properties) after every step.
 //!
-//! # Relationship to the TLA+ spec
+//! # Extensions beyond the formal specs (crash recovery)
 //!
-//! The Rust implementation is a *strict superset* of the TLA+ model:
+//! The Rust implementation extends the no-failure model with crash recovery
+//! mechanics that have no TLA+ or Alloy counterpart:
 //!
-//! | TLA+ action               | Rust code path                                    | Notes |
-//! |---------------------------|---------------------------------------------------|-------|
-//! | `CoordinatorSendPrepare`  | `Coordinator::on_message(StartTransaction, …)`    | Exact match |
-//! | `CoordinatorReceiveVote`  | `Coordinator::on_message(VoteCommit/Abort, …)`    | Exact match |
-//! | `CoordinatorDecide`       | `Coordinator::try_decide`                         | Extended: `abort_bias` can flip a unanimous commit to abort |
-//! | `CoordinatorSendDecision` | `Coordinator::try_send_decision`                  | Called from both `on_message` and `tick` |
-//! | `ParticipantVote`         | `Participant::on_message(Prepare, …)`             | TLA+ is nondeterministic; Rust uses `abort_bias` probability |
-//! | `ParticipantReceiveDecision` | `Participant::on_message(DecisionCommit/Abort, …)` | Exact match |
-//! | *(none)*                  | `Coordinator::tick` spontaneous abort              | Extension: models coordinator timeout/crash |
+//! - **Ack message** — participants acknowledge the decision, letting the
+//!   coordinator know delivery succeeded.
+//! - **[`AwaitingAcks`](coordinator::CoordinatorPhase::AwaitingAcks) phase** —
+//!   the coordinator waits for all Acks before completing.
+//! - **Durable state** — both coordinator and participant persist critical
+//!   state to survive crashes (`DurableState` structs).
+//! - **Retransmission** — the coordinator retransmits Prepare or Decision
+//!   messages on [`tick`](state_machine::StateMachine::tick) after a timeout.
+//! - **Idempotent re-send** — participants re-send their vote or Ack when
+//!   they receive a duplicate Prepare or Decision.
+//! - **Crash / Recover** — the [`Simulator`](simulator::Simulator) can crash
+//!   and [`recover`](state_machine::StateMachine::recover) actors mid-protocol.
 //!
-//! The TLA+ `Consistency` invariant corresponds to [`properties::check_validity`]
-//! (commit direction). The TLA+ `Agreement` invariant corresponds to
-//! [`properties::check_agreement`].
-
-// REVIEW: Update documentation to reflect Alloy's specification too.
+//! These extensions preserve Agreement (AC1) and Validity (AC2). Termination
+//! requires eventual recovery of all crashed actors.
 
 pub mod coordinator;
 pub mod participant;
