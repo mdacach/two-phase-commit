@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::property_test;
 
-use two_phase_commit::properties;
+use two_phase_commit::simulator::properties::{self, Observations};
 use two_phase_commit::simulator::{ExternalEvent, Simulator};
 use two_phase_commit::types::*;
 
@@ -66,7 +66,7 @@ fn test_safety(
     #[strategy = 0..=10u64] delivery_delay: u64,
     #[strategy = tick_actions_strategy(30)] tick_deltas: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay, 5);
+    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0.2, 0..delivery_delay, 5);
     let last_time = materialize_tick_events(&mut sim, &tick_deltas);
 
     sim.run();
@@ -83,14 +83,14 @@ fn test_termination(
     #[strategy = 0..=10u64] delivery_delay: u64,
     #[strategy = tick_actions_strategy(30)] tick_deltas: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    let mut sim = Simulator::new(n_participants, seed, 0.0, 0..delivery_delay, 5);
+    let mut sim = Simulator::new(n_participants, seed, 0.0, 0.2, 0..delivery_delay, 5);
     let last_time = materialize_tick_events(&mut sim, &tick_deltas);
 
     sim.run();
     sim.drain(last_time as usize + 100);
 
     prop_assert!(
-        properties::all_decided(sim.participants()),
+        sim.all_decided(),
         "Termination violated: not all participants decided. Coordinator: {:?}, phase: {:?}",
         sim.coordinator().decision(),
         sim.coordinator().phase(),
@@ -109,7 +109,7 @@ fn test_safety_with_crashes(
     #[strategy = 0..=10u64] delivery_delay: u64,
     #[strategy = crash_actions_strategy(40)] actions: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0..delivery_delay, 5);
+    let mut sim = Simulator::new(n_participants, seed, abort_bias, 0.2, 0..delivery_delay, 5);
     materialize_crash_events(&mut sim, &actions, n_participants);
 
     sim.run();
@@ -127,7 +127,7 @@ fn test_termination_with_crashes(
     #[strategy = 0..=10u64] delivery_delay: u64,
     #[strategy = crash_actions_strategy(40)] actions: Vec<u8>,
 ) -> Result<(), TestCaseError> {
-    let mut sim = Simulator::new(n_participants, seed, 0.0, 0..delivery_delay, 5);
+    let mut sim = Simulator::new(n_participants, seed, 0.0, 0.2, 0..delivery_delay, 5);
     let mut time = materialize_crash_events(&mut sim, &actions, n_participants);
 
     // Recovery sweep: recover all actors, then drain until quiescent.
@@ -142,7 +142,7 @@ fn test_termination_with_crashes(
     sim.drain(time as usize + 200);
 
     prop_assert!(
-        properties::all_decided(sim.participants()),
+        sim.all_decided(),
         "Termination violated after crash recovery: not all participants decided.\n  Coordinator: {:?}, phase: {:?}\n  Log:\n{}",
         sim.coordinator().decision(),
         sim.coordinator().phase(),
@@ -155,6 +155,10 @@ fn test_termination_with_crashes(
 // -- Deterministic edge-case tests --
 
 /// Drive the protocol to completion with fixed votes using a simple message queue.
+///
+/// Tracks wire-level observations (votes sent, decisions sent/delivered)
+/// identically to how the Simulator does, then checks properties against
+/// those observations rather than internal actor state.
 fn manual_protocol(votes: &[Vote], abort_bias: f64) {
     use two_phase_commit::coordinator::{Coordinator, CoordinatorPhase};
     use two_phase_commit::participant::Participant;
@@ -169,6 +173,8 @@ fn manual_protocol(votes: &[Vote], abort_bias: f64) {
         .map(|(i, &v)| Participant::with_fixed_vote(NodeId(i as u8), v))
         .collect();
 
+    let mut observations = Observations::new();
+
     // Drive the protocol with a simple message queue.
     let mut queue: Vec<Message> = vec![Message {
         message_type: MessageType::StartTransaction,
@@ -182,34 +188,40 @@ fn manual_protocol(votes: &[Vote], abort_bias: f64) {
 
         let batch = std::mem::take(&mut queue);
         for msg in batch {
+            observations.record_delivered(&msg);
             let outgoing = match msg.to {
                 ActorId::Coordinator => coord.on_message(&msg, time),
                 ActorId::Node(id) => participants[id.0 as usize].on_message(&msg, time),
             };
+            for out_msg in &outgoing {
+                observations.record_sent(out_msg);
+            }
             queue.extend(outgoing);
         }
 
         // If no messages pending and protocol not done, tick to advance.
         if queue.is_empty() && !matches!(coord.phase(), CoordinatorPhase::Done(_)) {
-            queue.extend(coord.tick(time));
+            let tick_msgs = coord.tick(time);
+            for msg in &tick_msgs {
+                observations.record_sent(msg);
+            }
+            queue.extend(tick_msgs);
             for p in &mut participants {
-                queue.extend(p.tick(time));
+                let tick_msgs = p.tick(time);
+                for msg in &tick_msgs {
+                    observations.record_sent(msg);
+                }
+                queue.extend(tick_msgs);
             }
         }
 
         assert!(time < 100, "Protocol did not terminate within 100 steps");
     }
 
-    // Check properties.
-    let part_map: std::collections::BTreeMap<NodeId, Participant> = participants
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| (NodeId(i as u8), p))
-        .collect();
-
-    properties::check_all_invariants(&coord, &part_map).expect("Invariant violated");
+    // Check properties from wire-level observations.
+    properties::check_all_invariants(&observations).expect("Invariant violated");
     assert!(
-        properties::all_decided(&part_map),
+        properties::all_decided(&observations, &nodes),
         "Not all participants decided"
     );
 
@@ -223,7 +235,7 @@ fn manual_protocol(votes: &[Vote], abort_bias: f64) {
     };
 
     assert_eq!(coord.decision(), Some(expected_decision));
-    for p in part_map.values() {
+    for p in &participants {
         assert_eq!(p.decision(), Some(expected_decision));
     }
 }

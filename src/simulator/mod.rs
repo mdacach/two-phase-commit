@@ -2,22 +2,22 @@
 //!
 //! # Execution model
 //!
-//! Events live in a priority queue ordered by `(timestamp, sequence_number)`.
+//! Events live in a priority queue ordered by timestamp.
 //! On each [`step`](Simulator::step):
 //!
 //! 1. The earliest event is popped.
 //! 2. The simulator's clock advances to its timestamp.
 //! 3. The event is dispatched to the appropriate actor.
 //! 4. Any messages returned by the actor are enqueued as `Deliver` events
-//!    at `clock + 1 + random_delay`, where the delay is drawn from
+//!    at `clock + random_delay`, where the delay is drawn from
 //!    `delivery_delay`.
-//! 5. Safety invariants are checked (panics on violation).
+//! 5. Safety invariants are checked.
 //!
 //! ## Crashes
 //!
-//! The simulator tracks which actors are alive. `Crash(id)` marks an actor as
-//! dead; `Recover(id)` calls `actor.recover()` and marks it alive. Messages
-//! delivered to dead actors are dropped and logged as `LogEntry::Drop`.
+//! The simulator simulates crashes and recoveries: `Crash(id)` marks an actor
+//! as crashed; `Recover(id)` calls `actor.recover()` and marks it as operating.
+//! Messages delivered to crashed actors are dropped.
 //!
 //! ## Quiescence
 //!
@@ -25,8 +25,10 @@
 //! probes for quiescence by injecting `TickAll` events and checking whether any
 //! actor produces new messages.  The protocol is quiescent when the event queue
 //! is empty and a full `TickAll` round produces nothing.
+//! Quiescence is specifically important when checking for protocol termination.
 
 mod event;
+pub mod properties;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -38,12 +40,20 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::coordinator::Coordinator;
 use crate::participant::Participant;
-use crate::properties;
 use crate::state_machine::StateMachine;
 use crate::types::*;
 
+use properties::Observations;
+
 pub use event::ExternalEvent;
 use event::{Event, InternalEvent};
+
+/// Whether a protocol actor is currently operating or has crashed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorStatus {
+    Operating,
+    Crashed,
+}
 
 /// Discrete-event simulator that drives the 2PC protocol actors.
 ///
@@ -55,13 +65,18 @@ use event::{Event, InternalEvent};
 pub struct Simulator {
     coordinator: Coordinator,
     participants: BTreeMap<NodeId, Participant>,
-    alive: BTreeMap<ActorId, bool>,
+    /// Tracks whether each actor is currently operating or has crashed.
+    actor_status: BTreeMap<ActorId, ActorStatus>,
     event_queue: event::EventQueue,
+    /// Simulated wall-clock time, advanced to the timestamp of each event.
     clock: u64,
     rng: ChaCha8Rng,
     /// Random delay added to each message delivery. An empty range means
-    /// zero delay (messages arrive at `clock + 1`).
+    /// zero delay (messages arrive "instantaneously" at t = `clock`).
     delivery_delay: Range<u64>,
+    /// Wire-level observations (votes sent, decisions sent/delivered)
+    /// collected during simulation for property checking.
+    observations: Observations,
     /// Append-only record of every event processed and message sent.
     action_log: Vec<LogEntry>,
 }
@@ -69,14 +84,16 @@ pub struct Simulator {
 impl Simulator {
     /// Create a simulator with `n_participants` participant nodes.
     ///
-    /// - `seed` — deterministic RNG seed (controls vote outcomes and delivery jitter).
+    /// - `seed` — deterministic RNG seed.
     /// - `abort_bias` — coordinator's probability of aborting despite unanimous commit.
+    /// - `participant_abort_bias` — probability that each participant votes Abort.
     /// - `delivery_delay` — range of random delay added to each message (0 = instant).
     /// - `retransmit_timeout` — ticks before the coordinator retransmits.
     pub fn new(
         n_participants: u8,
         seed: u64,
         abort_bias: f64,
+        participant_abort_bias: f64,
         delivery_delay: Range<u64>,
         retransmit_timeout: u64,
     ) -> Self {
@@ -88,36 +105,46 @@ impl Simulator {
         let coordinator = Coordinator::new(nodes.clone(), seed, abort_bias, retransmit_timeout);
 
         let mut participants = BTreeMap::new();
-        let mut alive = BTreeMap::new();
-        alive.insert(ActorId::Coordinator, true);
+        let mut actor_status = BTreeMap::new();
+        actor_status.insert(ActorId::Coordinator, ActorStatus::Operating);
         for &node_id in &nodes {
             let seed: u64 = rng.random();
-            participants.insert(node_id, Participant::new(node_id, seed, 0.2));
-            alive.insert(ActorId::Node(node_id), true);
+            participants.insert(
+                node_id,
+                Participant::new(node_id, seed, participant_abort_bias),
+            );
+            actor_status.insert(ActorId::Node(node_id), ActorStatus::Operating);
         }
 
         Self {
             coordinator,
             participants,
-            alive,
+            actor_status,
             event_queue: event::EventQueue::new(),
             clock: 0,
             rng,
             delivery_delay,
+            observations: Observations::new(),
             action_log: Vec::new(),
         }
     }
 
-    fn is_alive(&self, actor: ActorId) -> bool {
-        self.alive.get(&actor).copied().unwrap_or(true)
+    fn is_operating(&self, actor: ActorId) -> bool {
+        !matches!(self.actor_status.get(&actor), Some(ActorStatus::Crashed))
     }
 
     /// Schedule an external event for delivery at `at_time`.
+    ///
+    /// External events are not subject to delivery randomness — that would only
+    /// add noise.
     pub fn enqueue_external(&mut self, event: ExternalEvent, at_time: u64) {
         self.event_queue.insert(at_time, Event::External(event));
     }
 
     fn enqueue_outgoing(&mut self, messages: Vec<Message>) {
+        for msg in &messages {
+            self.observations.record_sent(msg);
+        }
         for msg in messages {
             let delay = if !self.delivery_delay.is_empty() {
                 self.rng.random_range(self.delivery_delay.clone())
@@ -147,9 +174,9 @@ impl Simulator {
 
         self.clock = timestamp;
 
-        // Drop messages to dead actors early.
+        // Drop messages to crashed actors early.
         if let Event::Internal(InternalEvent::Deliver { ref msg, .. }) = ev {
-            if !self.is_alive(msg.to) {
+            if !self.is_operating(msg.to) {
                 self.action_log.push(LogEntry::Drop {
                     at: self.clock,
                     msg: msg.clone(),
@@ -174,7 +201,7 @@ impl Simulator {
                         self.coordinator.on_message(&msg, self.clock)
                     }
                     ExternalEvent::Tick { to } => {
-                        if !self.is_alive(*to) {
+                        if !self.is_operating(*to) {
                             vec![]
                         } else {
                             match to {
@@ -188,14 +215,14 @@ impl Simulator {
                         }
                     }
                     ExternalEvent::TickAll => {
-                        let mut out = if self.is_alive(ActorId::Coordinator) {
+                        let mut out = if self.is_operating(ActorId::Coordinator) {
                             self.coordinator.tick(self.clock)
                         } else {
                             vec![]
                         };
                         let node_ids: Vec<NodeId> = self.participants.keys().copied().collect();
                         for id in node_ids {
-                            if self.is_alive(ActorId::Node(id)) {
+                            if self.is_operating(ActorId::Node(id)) {
                                 if let Some(p) = self.participants.get_mut(&id) {
                                     out.extend(p.tick(self.clock));
                                 }
@@ -204,13 +231,13 @@ impl Simulator {
                         out
                     }
                     ExternalEvent::Crash(actor_id) => {
-                        self.alive.insert(*actor_id, false);
+                        self.actor_status.insert(*actor_id, ActorStatus::Crashed);
                         vec![]
                     }
                     ExternalEvent::Recover(actor_id) => {
-                        let was_dead = !self.is_alive(*actor_id);
-                        self.alive.insert(*actor_id, true);
-                        if was_dead {
+                        let was_crashed = !self.is_operating(*actor_id);
+                        self.actor_status.insert(*actor_id, ActorStatus::Operating);
+                        if was_crashed {
                             match actor_id {
                                 ActorId::Coordinator => {
                                     self.coordinator.recover(self.clock);
@@ -231,6 +258,7 @@ impl Simulator {
                     at: self.clock,
                     msg: msg.clone(),
                 });
+                self.observations.record_delivered(&msg);
                 match to {
                     ActorId::Coordinator => self.coordinator.on_message(&msg, self.clock),
                     ActorId::Node(id) => self
@@ -244,13 +272,12 @@ impl Simulator {
 
         self.enqueue_outgoing(outgoing);
 
-        if let Err(e) = properties::check_all_invariants(&self.coordinator, &self.participants) {
+        if let Err(e) = properties::check_all_invariants(&self.observations) {
             panic!(
-                "Invariant violation at clock={}: {e}\n  coordinator: phase={:?}, decision={:?}, votes={:?}\n  log:\n{}",
+                "Invariant violation at clock={}: {e}\n  observations: {:?}\n  coordinator phase: {:?}\n  log:\n{}",
                 self.clock,
+                self.observations,
                 self.coordinator.phase(),
-                self.coordinator.decision(),
-                self.coordinator.votes(),
                 self.format_log(),
             );
         }
@@ -263,13 +290,17 @@ impl Simulator {
         while self.step() {}
     }
 
-    /// Returns `true` if every alive actor reports [`StateMachine::is_quiescent`].
+    /// Returns `true` if the event queue is empty and every operating actor
+    /// reports [`StateMachine::is_quiescent`].
     pub fn is_quiescent(&self) -> bool {
-        if self.is_alive(ActorId::Coordinator) && !self.coordinator.is_quiescent() {
+        if !self.event_queue.is_empty() {
+            return false;
+        }
+        if self.is_operating(ActorId::Coordinator) && !self.coordinator.is_quiescent() {
             return false;
         }
         for (&id, p) in &self.participants {
-            if self.is_alive(ActorId::Node(id)) && !p.is_quiescent() {
+            if self.is_operating(ActorId::Node(id)) && !p.is_quiescent() {
                 return false;
             }
         }
@@ -280,11 +311,11 @@ impl Simulator {
     /// produced for several consecutive rounds, up to `max_rounds` steps.
     /// Returns whether the system is quiescent.
     ///
-    /// If all alive actors report [`is_quiescent`](Self::is_quiescent) and the
-    /// event queue is empty, returns immediately without tick-probing.
-    /// Otherwise, multiple consecutive empty ticks are required before
-    /// declaring quiescence, since actors with retransmit timeouts may produce
-    /// messages only after enough time has elapsed.
+    /// If [`is_quiescent`](Self::is_quiescent) returns `true` (empty queue and
+    /// all operating actors quiescent), returns immediately without
+    /// tick-probing. Otherwise, multiple consecutive empty ticks are required
+    /// before declaring quiescence, since actors with retransmit timeouts may
+    /// produce messages only after enough time has elapsed.
     pub fn drain(&mut self, max_rounds: usize) -> bool {
         const QUIESCENCE_THRESHOLD: usize = 12;
         let mut consecutive_empty: usize = 0;
@@ -292,8 +323,7 @@ impl Simulator {
         for _ in 0..max_rounds {
             if self.step() {
                 consecutive_empty = 0;
-                // Check for early exit after processing an event.
-                if self.event_queue.is_empty() && self.is_quiescent() {
+                if self.is_quiescent() {
                     return true;
                 }
                 continue;
@@ -328,6 +358,16 @@ impl Simulator {
         &self.participants
     }
 
+    /// Wire-level observations collected during this simulation.
+    pub fn observations(&self) -> &Observations {
+        &self.observations
+    }
+
+    /// Returns `true` if every participant has received a decision.
+    pub fn all_decided(&self) -> bool {
+        properties::all_decided(&self.observations, self.coordinator.nodes())
+    }
+
     /// Append-only record of every event processed during this simulation.
     pub fn log(&self) -> &[LogEntry] {
         &self.action_log
@@ -356,7 +396,7 @@ pub enum LogEntry {
         deliver_at: u64,
         msg: Message,
     },
-    /// A message was dropped because the recipient was dead.
+    /// A message was dropped because the recipient had crashed.
     Drop { at: u64, msg: Message },
 }
 

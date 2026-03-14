@@ -8,7 +8,7 @@
 //! [`StateMachine`](state_machine::StateMachine)s that consume messages and
 //! produce outgoing messages.  A discrete-event [`Simulator`](simulator::Simulator)
 //! drives them through an event queue with configurable delivery delay, checking
-//! [safety invariants](properties) after every step.
+//! [safety invariants](simulator::properties) after every step.
 //!
 //! # Extensions beyond the formal specs (crash recovery)
 //!
@@ -33,7 +33,6 @@
 
 pub mod coordinator;
 pub mod participant;
-pub mod properties;
 pub mod simulator;
 pub mod state_machine;
 pub mod types;
