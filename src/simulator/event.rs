@@ -20,19 +20,19 @@ pub enum ExternalEvent {
     /// This event happens exactly once, at the start of each simulation, and
     /// triggers the coordinator to start its messaging.
     StartTransaction,
-    /// Advance a single actor's simulated clock by one.
+    /// Call `tick` on a single actor at the current simulator time.
     Tick { to: ActorId },
-    /// Advance every actor's clock by one.
+    /// Call `tick` on every actor at the current simulator time.
     TickAll,
     /// Crash an actor.
     ///
-    /// Messages delivered to crashed actors are dropped, and actor is
-    /// un-operational until it's recovered.
+    /// Messages delivered to crashed actors are dropped. The actor is
+    /// non-operational until recovered.
     Crash(ActorId),
     /// Recover an actor.
     ///
     /// Triggers the [`recover`](crate::state_machine::StateMachine::recover) method,
-    /// which recovers state based in durable storage.
+    /// which recovers state based on durable storage.
     Recover(ActorId),
 }
 
@@ -66,8 +66,8 @@ impl Ord for TimestampedEvent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.timestamp
             .cmp(&other.timestamp)
-            .then(self.sequence_number.cmp(&other.sequence_number))
-            .then(self.event.cmp(&other.event))
+            .then_with(|| self.sequence_number.cmp(&other.sequence_number))
+            .then_with(|| self.event.cmp(&other.event))
             .reverse()
     }
 }
