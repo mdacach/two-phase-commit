@@ -117,3 +117,34 @@ detection, Segala (quiescence/fairness/testing).
 | # | Line | Review | Assessment | Status |
 |---|------|--------|------------|--------|
 | 33 | 30 | Update documentation to reflect Alloy specification | **Agree.** The crate doc only mentions TLA+, but there's a complete Alloy spec at `alloy/TwoPhaseCommit.als`. Should add a parallel correspondence table and note the Alloy model's distinguishing features (ever-growing message network, nondeterministic coordinator abort, weak fairness on vote reception). | Fixed |
+
+## Round 3
+
+### participant.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 34 | 31 | Separate `Decision` into `Vote` and `Decision` for less ambiguity | **Disagree.** `Vote` and `Decision` are isomorphic (`Commit`/`Abort`). A separate `Vote` type would require conversion at every boundary (`check_validity` compares votes to decisions, coordinator stores votes as `Decision`, WAL uses `Decision` for both). The naming in context (`vote: Option<Decision>` vs `decision: Decision`) already disambiguates. The added type-level boilerplate wouldn't catch real bugs. | Skipped |
+| 35 | 51 | Rename "wal" to `durable_state` | **Agree.** The struct is not a write-ahead log (there's no log); it's durable state that survives crashes. `DurableState` is more accurate. Renamed struct, field, and all references in both coordinator and participant. | Fixed |
+
+### coordinator.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 36 | 17 | Make doc links for phases, messages, and structures in module docs | **Agree.** Converted plain-text references to rustdoc links (`[CoordinatorPhase::Voting]`, `[MessageType::Prepare]`, `[StateMachine::tick]`, etc.) so the docs are navigable. | Fixed |
+
+### simulator/event.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 37 | 56 | Better comment on `impl Ord` | **Agree.** Replaced with a doc comment explaining natural-order-then-reverse for min-heap semantics. | Fixed |
+| 38 | 60 | Use `.reverse()` instead of `other.cmp(self)` | **Agree.** `self.cmp(other).reverse()` reads as "natural order, reversed" — clearer than the swapped-arguments idiom. | Fixed |
+| 39 | 74–79 | `PartialEq` ignores event payload; include all fields | **Agree.** The custom `PartialEq` was safe only because sequence numbers are unique, but it was fragile and violated the spirit of the `Ord`/`Eq` consistency contract. Added `Ord`/`PartialOrd` derives to `Event`, `ExternalEvent`, `InternalEvent`, `Message`, and `MessageType`, then included the event payload in `TimestampedEvent`'s `Ord` and removed the custom `PartialEq`/`Eq` (now derived). | Fixed |
+| 40 | 90 | Explain use of sequence number (field) | **Agree.** Added doc comment: monotonically increasing counter that breaks timestamp ties, preserving FIFO insertion order for deterministic runs. | Fixed |
+| 41 | 103 | Explain use of sequence number (in `insert`) | **Agree.** Added inline comment at assignment site. | Fixed |
+
+### lib.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 42 | 18 | Convert crash-recovery features table to bullet list | **Agree.** Tables are hard to scan for prose descriptions. Converted to a bullet list with bold feature names and short explanations. Also updated "Write-ahead log" → "Durable state" to match the rename. | Fixed |
