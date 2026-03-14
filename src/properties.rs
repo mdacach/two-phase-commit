@@ -71,7 +71,7 @@ pub fn check_validity(
                     ));
                 }
                 for (id, vote) in votes {
-                    if *vote != Decision::Commit {
+                    if *vote != Vote::Commit {
                         return Err(format!(
                             "Validity violated: coordinator committed but {id} voted {vote:?}"
                         ));
@@ -80,7 +80,7 @@ pub fn check_validity(
             }
             // Always check participants' own vote records.
             for (id, p) in participants {
-                if p.vote() == Some(Decision::Abort) {
+                if p.vote() == Some(Vote::Abort) {
                     return Err(format!(
                         "Validity violated: coordinator committed but participant {id} voted Abort"
                     ));

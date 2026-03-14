@@ -155,7 +155,7 @@ fn test_termination_with_crashes(
 // -- Deterministic edge-case tests --
 
 /// Drive the protocol to completion with fixed votes using a simple message queue.
-fn manual_protocol(votes: &[Decision], abort_bias: f64) {
+fn manual_protocol(votes: &[Vote], abort_bias: f64) {
     use two_phase_commit::coordinator::{Coordinator, CoordinatorPhase};
     use two_phase_commit::participant::Participant;
     use two_phase_commit::state_machine::StateMachine;
@@ -216,7 +216,7 @@ fn manual_protocol(votes: &[Decision], abort_bias: f64) {
     // Verify expected outcomes.
     let expected_decision = if abort_bias >= 1.0 {
         Decision::Abort
-    } else if votes.iter().any(|v| *v == Decision::Abort) {
+    } else if votes.iter().any(|v| *v == Vote::Abort) {
         Decision::Abort
     } else {
         Decision::Commit
@@ -230,15 +230,15 @@ fn manual_protocol(votes: &[Decision], abort_bias: f64) {
 
 #[test]
 fn all_commit() {
-    manual_protocol(&[Decision::Commit, Decision::Commit], 0.0);
+    manual_protocol(&[Vote::Commit, Vote::Commit], 0.0);
 }
 
 #[test]
 fn one_abort() {
-    manual_protocol(&[Decision::Commit, Decision::Abort], 0.0);
+    manual_protocol(&[Vote::Commit, Vote::Abort], 0.0);
 }
 
 #[test]
 fn coordinator_abort_despite_all_commits() {
-    manual_protocol(&[Decision::Commit, Decision::Commit], 1.0);
+    manual_protocol(&[Vote::Commit, Vote::Commit], 1.0);
 }

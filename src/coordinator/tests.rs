@@ -146,7 +146,7 @@ fn retransmit_prepare_on_timeout() {
     };
 
     // Record one vote so only the other node gets retransmit.
-    coord.votes.insert(NodeId(0), Decision::Commit);
+    coord.votes.insert(NodeId(0), Vote::Commit);
 
     // Before timeout: no retransmit.
     let msgs = coord.tick(4);

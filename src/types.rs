@@ -1,12 +1,10 @@
 //! Core types shared across the crate.
-//!
-//! These types form the protocol vocabulary: identifiers for actors, the
-//! commit/abort decision value, and the messages exchanged between the
-//! coordinator and participants.
 
 use std::fmt;
 
-/// Identifier for a participant node (0-indexed).
+/// Identifier for a [`Participant`] node.
+///
+/// Note that the [`Coordinator`] has its own identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u8);
 
@@ -16,16 +14,22 @@ impl fmt::Display for NodeId {
     }
 }
 
-/// The outcome of the two-phase commit protocol: either all nodes commit
-/// the transaction, or all nodes abort it.
+/// A participant's vote on whether to commit or abort the transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vote {
+    Commit,
+    Abort,
+}
+
+/// The coordinator's final decision about the transaction: either all nodes
+/// must commit the it, or all nodes must abort it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Commit,
     Abort,
 }
 
-/// Identifies a protocol actor — either the single coordinator or one of
-/// the participant nodes.
+/// Identifier for a protocol actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActorId {
     Coordinator,
@@ -42,14 +46,6 @@ impl fmt::Display for ActorId {
 }
 
 /// Messages exchanged during the protocol.
-///
-/// The flow is:
-/// ```text
-/// Client ──StartTransaction──▶ Coordinator ──Prepare──▶ Participants
-///                                    ◀──VoteCommit/VoteAbort──
-///                              Coordinator ──DecisionCommit/DecisionAbort──▶ Participants
-///                                    ◀──Ack──
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MessageType {
     /// External trigger that begins the protocol (client → coordinator).
@@ -64,7 +60,7 @@ pub enum MessageType {
     DecisionCommit,
     /// Phase 2: coordinator broadcasts an abort decision.
     DecisionAbort,
-    /// Participant acknowledges receipt of the decision (crash-recovery extension).
+    /// Participant acknowledges receipt of the decision.
     Ack,
 }
 

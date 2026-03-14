@@ -3,15 +3,35 @@
 //! # Phase transitions
 //!
 //! ```text
-//! Waiting ──StartTransaction──▶ Voting ──try_decide──▶ Decided(d) ──try_send_decision──▶ AwaitingAcks(d) ──all acks──▶ Done(d)
-//!                                  │                       ▲
-//!                                  └──spontaneous abort────┘
-//!                                       (tick, prob = abort_bias / 10)
+//!                       ┌─────────┐
+//!                       │ Waiting │
+//!                       └────┬────┘
+//!                            │ StartTransaction
+//!                            v
+//!                       ┌─────────┐
+//!               ┌───────│ Voting  │───────┐
+//!               │       └─────────┘       │
+//!         all votes in               tick timeout
+//!               │                (spontaneous abort)
+//!               v                         v
+//!                      ┌───────────┐
+//!                      │Decided(d) │
+//!                      └─────┬─────┘
+//!                            │ broadcast
+//!                            v
+//!                    ┌───────────────┐
+//!                    │AwaitingAcks(d)│
+//!                    └───────┬───────┘
+//!                            │ all acks
+//!                            v
+//!                       ┌─────────┐
+//!                       │ Done(d) │
+//!                       └─────────┘
 //! ```
 //!
 //! # Retransmission
 //!
-//! Reliable communication is accomplished by message retransmission:
+//! Reliable communication is accomplished through message retransmission:
 //! The coordinator retransmits on [`tick`](StateMachine::tick) if
 //! `retransmit_timeout` time has elapsed since the last send:
 //! - In [`Voting`](CoordinatorPhase::Voting): retransmit
@@ -21,41 +41,32 @@
 //!
 //! # Crash recovery
 //!
-//! The coordinator holds a [`DurableState`] struct representing on-disk state
-//! that survives crashes. On [`recover`](StateMachine::recover):
-//! - If `durable_state.decision` is `Some(d)`: reset to
-//!   [`Decided(d)`](CoordinatorPhase::Decided), retransmit on next tick.
-//! - If `None`: reset to [`Voting`](CoordinatorPhase::Voting), clear votes,
-//!   retransmit [`Prepare`](MessageType::Prepare) on next tick.
+//! The coordinator persists its decision to [`DurableState`] before
+//! broadcasting. On [`recover`](StateMachine::recover):
+//! - Durable decision → reset to [`Decided`](CoordinatorPhase::Decided),
+//!   re-broadcast on next tick.
+//! - No durable decision → reset to [`Voting`](CoordinatorPhase::Voting)
+//!   with cleared votes, retransmit Prepare on next tick.
 //!
 //! # `abort_bias`
 //!
-//! Controls two distinct behaviours (neither has a TLA+ counterpart):
+//! Controls two distinct behaviours:
 //!
 //! 1. **Vote-triggered abort** — When all participants vote Commit, the
 //!    coordinator still aborts with probability `abort_bias`. This models an
-//!    additional policy check or crash after vote collection.
+//!    additional policy check or failure after vote collection.
 //! 2. **Spontaneous abort** — On every `tick` while in `Voting`, the
-//!    coordinator aborts with probability `abort_bias / 10`. This models a
-//!    coordinator timeout that fires independently of vote arrival.
+//!    coordinator aborts with probability `abort_bias / 10`.
 //!
-//! With `abort_bias = 0.0` the coordinator is deterministic: it commits iff
-//! every participant votes Commit. This is the behaviour the TLA+ spec models.
-//!
-//! # `on_message` calls `tick` internally
-//!
-//! Every `on_message` call begins with `self.tick(at_time)`, so the spontaneous
-//! abort check runs before each message is processed. This means a vote delivery
-//! can be pre-empted by a spontaneous abort that fires in the leading tick. The
-//! simulator relies on this: it does **not** tick actors before delivering
-//! messages.
+//! With `abort_bias = 0.0` the coordinator is deterministic: it commits if
+//! and only if every participant votes Commit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::state_machine::StateMachine;
 use crate::types::*;
@@ -104,9 +115,12 @@ struct DurableState {
 /// [module docs](self) for the full phase-transition diagram and
 /// crash-recovery semantics.
 pub struct Coordinator {
+    /// Participant node IDs managed by this coordinator.
     nodes: Vec<NodeId>,
     phase: CoordinatorPhase,
-    votes: BTreeMap<NodeId, Decision>,
+    /// Votes received from participants (cleared on recovery without a decision).
+    votes: BTreeMap<NodeId, Vote>,
+    /// Acks received from participants (cleared on any recovery).
     acks: BTreeSet<NodeId>,
     durable_state: DurableState,
     config: Config,
@@ -152,9 +166,8 @@ impl Coordinator {
         }
     }
 
-    /// Votes received so far (node → vote). Cleared on crash recovery without
-    /// a WAL decision.
-    pub fn votes(&self) -> &BTreeMap<NodeId, Decision> {
+    /// Votes received so far (node → vote).
+    pub fn votes(&self) -> &BTreeMap<NodeId, Vote> {
         &self.votes
     }
 
@@ -171,7 +184,7 @@ impl Coordinator {
             return;
         }
 
-        if self.votes.values().any(|&v| v == Decision::Abort) {
+        if self.votes.values().any(|&v| v == Vote::Abort) {
             self.phase = CoordinatorPhase::Decided(Decision::Abort);
         } else if self.votes.len() == self.nodes.len() {
             let decision = if self
@@ -187,7 +200,7 @@ impl Coordinator {
         }
     }
 
-    /// If in `Decided`, write to WAL, broadcast the decision to all
+    /// If in `Decided`, write to durable storage, broadcast the decision to all
     /// participants, and transition to `AwaitingAcks`. No-op in any other phase.
     fn try_send_decision(&mut self, at_time: u64) -> Vec<Message> {
         let CoordinatorPhase::Decided(decision) = self.phase else {
@@ -241,9 +254,9 @@ impl StateMachine for Coordinator {
                     return outgoing;
                 }
                 let vote = if msg.message_type == MessageType::VoteCommit {
-                    Decision::Commit
+                    Vote::Commit
                 } else {
-                    Decision::Abort
+                    Vote::Abort
                 };
                 self.votes.insert(node, vote);
                 self.try_decide();
@@ -260,7 +273,7 @@ impl StateMachine for Coordinator {
                 }
             }
             (MessageType::Ack, CoordinatorPhase::Done(_)) => {
-                // Duplicate ack after protocol complete, ignore.
+                trace!("Duplicate ack after protocol complete, ignoring");
             }
             (msg_type, phase) => {
                 warn!(?msg_type, ?phase, "Ignoring unexpected message");
@@ -337,7 +350,7 @@ impl StateMachine for Coordinator {
         )
     }
 
-    /// Restore volatile state from durable storage after a crash.
+    /// Restore state from durable storage after a crash.
     ///
     /// - If durable state contains a decision, reset to `Decided(d)` so the
     ///   next tick broadcasts the decision and transitions to `AwaitingAcks`.
@@ -350,6 +363,7 @@ impl StateMachine for Coordinator {
         match self.durable_state.decision {
             Some(d) => {
                 self.phase = CoordinatorPhase::Decided(d);
+                self.votes.clear();
                 self.acks.clear();
             }
             None => {

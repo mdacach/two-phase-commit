@@ -3,16 +3,35 @@
 //! # Phase transitions
 //!
 //! ```text
-//! Waiting ──Prepare──▶ Voted(d)
-//!    │                    │
-//!    └──DecisionX──▶ Decided { vote: None, … }
-//!                         │
-//!         Voted(d) ──DecisionX──▶ Decided { vote: Some(d), … }
+//!       ┌─────────┐   Prepare    ┌──────────┐
+//!       │ Waiting │ ───────────> │ Voted(v) │
+//!       └────┬────┘              └─────┬────┘
+//!            │ Decision(X)             │ Decision(X)
+//!            │ (before voting)         │
+//!            v                         v
+//!  ┌─────────────────┐   ┌─────────────────────┐
+//!  │ Decided         │   │ Decided              │
+//!  │   vote: None    │   │   vote: Some(v)      │
+//!  │   decision: X   │   │   decision: X        │
+//!  └─────────────────┘   └──────────────────────┘
 //! ```
 //!
-//! Note that a participant can receive the coordinator's decision *before* it
-//! has voted, or even before it received the "Prepare" message — for example if
-//! another participant's abort caused an early decision.
+//! A participant can receive the coordinator's decision *before* it has voted,
+//! or even before it received Prepare — for example if another participant's
+//! abort caused an early decision.
+//!
+//! # Crash recovery
+//!
+//! On [`recover`](StateMachine::recover), the participant restores its phase
+//! from [`DurableState`]:
+//! - Durable decision → [`Decided`](ParticipantPhase::Decided).
+//! - Durable vote only → [`Voted`](ParticipantPhase::Voted).
+//! - Neither → [`Waiting`](ParticipantPhase::Waiting).
+//!
+//! # Idempotent re-send
+//!
+//! - Duplicate Prepare while in `Voted`: re-sends the original vote.
+//! - Duplicate Decision while in `Decided`: re-sends Ack.
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -28,13 +47,13 @@ pub enum ParticipantPhase {
     /// Participant is waiting for a `Prepare` message from the coordinator.
     Waiting,
     /// Participant has voted and is waiting for coordinator's final decision.
-    Voted(Decision),
-    /// Participant has decided.
+    Voted(Vote),
+    /// Participant has received the coordinator's decision.
     ///
-    /// `vote` is `None` if the coordinator's decision arrived before Prepare
-    /// (so the participant never voted).
+    /// `vote` is `None` if the decision arrived before Prepare (so the
+    /// participant never voted).
     Decided {
-        vote: Option<Decision>,
+        vote: Option<Vote>,
         decision: Decision,
     },
 }
@@ -48,7 +67,11 @@ struct Config {
 /// Durable state that survives crashes. Written before sending messages,
 /// read on recovery.
 struct DurableState {
-    vote: Option<Decision>,
+    /// Persisted so the participant can re-send its vote after a crash
+    /// (the coordinator may still be collecting votes).
+    vote: Option<Vote>,
+    /// Persisted so the participant recovers directly into `Decided`
+    /// rather than blocking in `Voted` waiting for a retransmission.
     decision: Option<Decision>,
 }
 
@@ -86,10 +109,10 @@ impl Participant {
 
     /// Create a participant with a deterministic vote.
     /// `Commit` → `abort_bias = 0.0`, `Abort` → `abort_bias = 1.0`.
-    pub fn with_fixed_vote(id: NodeId, vote: Decision) -> Self {
+    pub fn with_fixed_vote(id: NodeId, vote: Vote) -> Self {
         let abort_bias = match vote {
-            Decision::Commit => 0.0,
-            Decision::Abort => 1.0,
+            Vote::Commit => 0.0,
+            Vote::Abort => 1.0,
         };
         Self::new(id, 0, abort_bias)
     }
@@ -100,7 +123,7 @@ impl Participant {
     }
 
     /// The vote this participant cast, if any.
-    pub fn vote(&self) -> Option<Decision> {
+    pub fn vote(&self) -> Option<Vote> {
         match self.phase {
             ParticipantPhase::Voted(v) => Some(v),
             ParticipantPhase::Decided { vote, .. } => vote,
@@ -108,7 +131,7 @@ impl Participant {
         }
     }
 
-    /// The decision this participant received from the coordinator, if any.
+    /// The decision received from the coordinator, if any.
     pub fn decision(&self) -> Option<Decision> {
         match self.phase {
             ParticipantPhase::Decided { decision, .. } => Some(decision),
@@ -132,10 +155,10 @@ impl Participant {
         }
     }
 
-    fn make_vote_msg(&self, vote: Decision) -> Message {
+    fn make_vote_msg(&self, vote: Vote) -> Message {
         let message_type = match vote {
-            Decision::Commit => MessageType::VoteCommit,
-            Decision::Abort => MessageType::VoteAbort,
+            Vote::Commit => MessageType::VoteCommit,
+            Vote::Abort => MessageType::VoteAbort,
         };
         Message {
             message_type,
@@ -146,7 +169,9 @@ impl Participant {
 }
 
 impl StateMachine for Participant {
-    fn on_message(&mut self, msg: &Message, _at_time: u64) -> Vec<Message> {
+    fn on_message(&mut self, msg: &Message, at_time: u64) -> Vec<Message> {
+        let mut outgoing = self.tick(at_time);
+
         match (msg.message_type, self.phase) {
             (MessageType::Prepare, ParticipantPhase::Waiting) => {
                 let vote = if self
@@ -154,13 +179,13 @@ impl StateMachine for Participant {
                     .rng
                     .random_bool(self.config.abort_bias.clamp(0.0, 1.0))
                 {
-                    Decision::Abort
+                    Vote::Abort
                 } else {
-                    Decision::Commit
+                    Vote::Commit
                 };
                 self.durable_state.vote = Some(vote);
                 self.phase = ParticipantPhase::Voted(vote);
-                vec![self.make_vote_msg(vote)]
+                outgoing.push(self.make_vote_msg(vote));
             }
             // Duplicate Prepare while already voted: re-send vote.
             //
@@ -169,7 +194,7 @@ impl StateMachine for Participant {
             // Prepare. The participant must re-send its original vote so the
             // coordinator can re-collect votes and decide.
             (MessageType::Prepare, ParticipantPhase::Voted(vote)) => {
-                vec![self.make_vote_msg(vote)]
+                outgoing.push(self.make_vote_msg(vote));
             }
             (
                 MessageType::DecisionCommit | MessageType::DecisionAbort,
@@ -186,7 +211,7 @@ impl StateMachine for Participant {
                 };
                 self.durable_state.decision = Some(decision);
                 self.phase = ParticipantPhase::Decided { vote, decision };
-                vec![self.make_ack()]
+                outgoing.push(self.make_ack());
             }
             // Duplicate Decision while already decided: re-send Ack.
             //
@@ -198,22 +223,23 @@ impl StateMachine for Participant {
                 MessageType::DecisionCommit | MessageType::DecisionAbort,
                 ParticipantPhase::Decided { .. },
             ) => {
-                vec![self.make_ack()]
+                outgoing.push(self.make_ack());
             }
             (msg_type, phase) => {
                 warn!(participant = %self.id, ?msg_type, ?phase, "Ignoring unexpected message");
-                vec![]
             }
         }
+
+        outgoing
     }
 
-    fn is_quiescent(&self) -> bool {
-        matches!(
-            self.phase,
-            ParticipantPhase::Decided { .. } | ParticipantPhase::Waiting
-        )
+    fn tick(&mut self, _at_time: u64) -> Vec<Message> {
+        vec![]
     }
 
+    /// Restore phase from durable storage after a crash. Without this,
+    /// a participant that voted would forget its vote and potentially
+    /// vote differently on a retransmitted Prepare.
     fn recover(&mut self, _at_time: u64) {
         if let Some(decision) = self.durable_state.decision {
             self.phase = ParticipantPhase::Decided {
@@ -225,6 +251,15 @@ impl StateMachine for Participant {
         } else {
             self.phase = ParticipantPhase::Waiting;
         }
+    }
+
+    /// Quiescent in `Waiting` (not yet part of a transaction) or `Decided`
+    /// (final state — will only re-send Ack if prompted).
+    fn is_quiescent(&self) -> bool {
+        matches!(
+            self.phase,
+            ParticipantPhase::Decided { .. } | ParticipantPhase::Waiting
+        )
     }
 }
 
