@@ -148,3 +148,32 @@ detection, Segala (quiescence/fairness/testing).
 | # | Line | Review | Assessment | Status |
 |---|------|--------|------------|--------|
 | 42 | 18 | Convert crash-recovery features table to bullet list | **Agree.** Tables are hard to scan for prose descriptions. Converted to a bullet list with bold feature names and short explanations. Also updated "Write-ahead log" → "Durable state" to match the rename. | Fixed |
+
+## Round 4
+
+### coordinator.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 43 | 1 | Use ascii-diagram skill for phase transitions | **Already addressed.** Diagrams were present but used a compact single-line layout. Replaced with a vertical box-drawing diagram that clearly shows both paths to `Decided` (all votes in + spontaneous abort). Removed REVIEW marker. | Fixed |
+| 44 | 257 | Log duplicate ack in Done state | **Agree.** Added `trace!` log. Distinguishes expected late duplicates from the `warn!`-level catch-all for genuinely unexpected messages. | Fixed |
+
+### participant.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 45 | 1 | Use ascii-diagram skill for phase transitions | **Already addressed.** Replaced compact text diagram with a two-column box-drawing layout showing both paths to `Decided` (via `Voted` with vote retained, or directly from `Waiting` with vote lost). Removed REVIEW marker. | Fixed |
+
+### simulator.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 46 | 60 | Make enum for Operating/Crashed | **Agree.** Replaced `BTreeMap<ActorId, bool>` with `BTreeMap<ActorId, ActorStatus>` where `ActorStatus` is `Operating` or `Crashed`. Self-documenting at every use site. Skipped crash timestamp as noted unused by the reviewer. | Fixed |
+
+### properties.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 47 | 1–6 | Significant changes needed; move property checks to simulator; simulator should track votes | **Stale.** The concerns were addressed in rounds 1–2: `check_validity` now checks both coordinator vote records (when available) and participant vote records (always available) as ground truth. The simulator already calls `check_all_invariants` after every step. Removed the 6-line REVIEW block. | Removed |
+| 48 | 57 | Empty `// REVIEW:` marker | **Stale.** Leftover from a previous round. Removed. | Removed |
+| 49 | 64–66 | Simulator must track votes so commit-validity survives coordinator crash | **Agree.** Added `observed_votes: BTreeMap<NodeId, Vote>` to `Simulator`, recorded in `enqueue_outgoing` when VoteCommit/VoteAbort messages are sent. `check_validity` now takes `observed_votes` from the simulator instead of reading the coordinator's volatile vote map. The manual test in `tests/simulation.rs` builds observed votes from the known input. | Fixed |
