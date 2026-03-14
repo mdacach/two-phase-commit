@@ -10,73 +10,70 @@
 //!         Voted(d) ──DecisionX──▶ Decided { vote: Some(d), … }
 //! ```
 //!
-//! A participant can receive the coordinator's decision *before* the Prepare
-//! message (if another participant's abort caused an early decision).  In that
-//! case `vote` is `None` — the participant never voted.
-//!
-//! # Idempotent message handling
-//!
-//! - Duplicate Prepare while in `Voted`: re-send the original vote.
-//! - Duplicate Decision while in `Decided`: re-send Ack.
-//!
-//! # Crash recovery (WAL)
-//!
-//! The participant holds a `Wal` struct with `vote: Option<Decision>` and
-//! `decision: Option<Decision>`. On `recover()`:
-//! - If `wal.decision` is `Some(d)`: reset to `Decided { vote: wal.vote, decision: d }`.
-//! - Else if `wal.vote` is `Some(v)`: reset to `Voted(v)`.
-//! - Else: reset to `Waiting`.
-//!
-//! # `abort_bias`
-//!
-//! Controls the probability that the participant votes Abort when it receives
-//! Prepare.  With `abort_bias = 0.0` the participant always votes Commit; with
-//! `1.0` it always votes Abort.  [`with_fixed_vote`](Participant::with_fixed_vote)
-//! is sugar for the extreme values.
+//! Note that a participant can receive the coordinator's decision *before* it
+//! has voted, or even before it received the "Prepare" message — for example if
+//! another participant's abort caused an early decision.
 
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use tracing::warn;
 
 use crate::state_machine::StateMachine;
 use crate::types::*;
 
+/// The participant's phase in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParticipantPhase {
+    /// Participant is waiting for a `Prepare` message from the coordinator.
     Waiting,
+    /// Participant has voted and is waiting for coordinator's final decision.
     Voted(Decision),
-    /// `vote` is `None` if the decision arrived before Prepare (the participant
-    /// never voted). The Alloy spec permits this: `participantReceiveDecision`
-    /// only requires `n not in participantDecided`, not that n has voted.
+    /// Participant has decided.
+    ///
+    /// `vote` is `None` if the coordinator's decision arrived before Prepare
+    /// (so the participant never voted).
     Decided {
         vote: Option<Decision>,
         decision: Decision,
     },
 }
 
+/// Simulation configuration.
 struct Config {
     rng: ChaCha8Rng,
     abort_bias: f64,
 }
 
-struct Wal {
+/// Durable state that survives crashes. Written before sending messages,
+/// read on recovery.
+struct DurableState {
     vote: Option<Decision>,
     decision: Option<Decision>,
 }
 
+/// A participant in the two-phase commit protocol.
+///
+/// Participants vote on whether to commit or abort, then wait for the
+/// coordinator's decision. See the [module docs](self) for the full
+/// phase-transition diagram and crash-recovery semantics.
 pub struct Participant {
     id: NodeId,
     phase: ParticipantPhase,
-    wal: Wal,
+    durable_state: DurableState,
     config: Config,
 }
 
 impl Participant {
+    /// Create a participant with the given `id` and abort probability.
+    ///
+    /// - `rng_seed` — deterministic seed for the vote coin flip.
+    /// - `abort_bias` — probability that this participant votes Abort on Prepare.
     pub fn new(id: NodeId, rng_seed: u64, abort_bias: f64) -> Self {
         Self {
             id,
             phase: ParticipantPhase::Waiting,
-            wal: Wal {
+            durable_state: DurableState {
                 vote: None,
                 decision: None,
             },
@@ -97,10 +94,12 @@ impl Participant {
         Self::new(id, 0, abort_bias)
     }
 
+    /// Current protocol phase.
     pub fn phase(&self) -> ParticipantPhase {
         self.phase
     }
 
+    /// The vote this participant cast, if any.
     pub fn vote(&self) -> Option<Decision> {
         match self.phase {
             ParticipantPhase::Voted(v) => Some(v),
@@ -109,6 +108,7 @@ impl Participant {
         }
     }
 
+    /// The decision this participant received from the coordinator, if any.
     pub fn decision(&self) -> Option<Decision> {
         match self.phase {
             ParticipantPhase::Decided { decision, .. } => Some(decision),
@@ -116,6 +116,7 @@ impl Participant {
         }
     }
 
+    /// Whether this participant has cast a vote (either commit or abort).
     pub fn has_voted(&self) -> bool {
         matches!(
             self.phase,
@@ -157,11 +158,16 @@ impl StateMachine for Participant {
                 } else {
                     Decision::Commit
                 };
-                self.wal.vote = Some(vote);
+                self.durable_state.vote = Some(vote);
                 self.phase = ParticipantPhase::Voted(vote);
                 vec![self.make_vote_msg(vote)]
             }
             // Duplicate Prepare while already voted: re-send vote.
+            //
+            // This occurs after a coordinator crash and recovery: the
+            // coordinator re-enters Voting with cleared votes and retransmits
+            // Prepare. The participant must re-send its original vote so the
+            // coordinator can re-collect votes and decide.
             (MessageType::Prepare, ParticipantPhase::Voted(vote)) => {
                 vec![self.make_vote_msg(vote)]
             }
@@ -178,11 +184,16 @@ impl StateMachine for Participant {
                 } else {
                     Decision::Abort
                 };
-                self.wal.decision = Some(decision);
+                self.durable_state.decision = Some(decision);
                 self.phase = ParticipantPhase::Decided { vote, decision };
                 vec![self.make_ack()]
             }
             // Duplicate Decision while already decided: re-send Ack.
+            //
+            // This occurs after a coordinator crash and recovery: the
+            // coordinator re-enters AwaitingAcks and retransmits Decision.
+            // The participant must re-send its Ack so the coordinator can
+            // complete the protocol.
             (
                 MessageType::DecisionCommit | MessageType::DecisionAbort,
                 ParticipantPhase::Decided { .. },
@@ -190,10 +201,7 @@ impl StateMachine for Participant {
                 vec![self.make_ack()]
             }
             (msg_type, phase) => {
-                eprintln!(
-                    "[Participant {}] Ignoring {msg_type:?} in {phase:?}",
-                    self.id
-                );
+                warn!(participant = %self.id, ?msg_type, ?phase, "Ignoring unexpected message");
                 vec![]
             }
         }
@@ -207,12 +215,12 @@ impl StateMachine for Participant {
     }
 
     fn recover(&mut self, _at_time: u64) {
-        if let Some(decision) = self.wal.decision {
+        if let Some(decision) = self.durable_state.decision {
             self.phase = ParticipantPhase::Decided {
-                vote: self.wal.vote,
+                vote: self.durable_state.vote,
                 decision,
             };
-        } else if let Some(vote) = self.wal.vote {
+        } else if let Some(vote) = self.durable_state.vote {
             self.phase = ParticipantPhase::Voted(vote);
         } else {
             self.phase = ParticipantPhase::Waiting;
