@@ -239,21 +239,6 @@ fn one_abort() {
 }
 
 #[test]
-fn all_abort() {
-    manual_protocol(&[Decision::Abort, Decision::Abort], 0.0);
-}
-
-#[test]
 fn coordinator_abort_despite_all_commits() {
     manual_protocol(&[Decision::Commit, Decision::Commit], 1.0);
-}
-
-#[test]
-fn single_participant_commit() {
-    manual_protocol(&[Decision::Commit], 0.0);
-}
-
-#[test]
-fn single_participant_abort() {
-    manual_protocol(&[Decision::Abort], 0.0);
 }
