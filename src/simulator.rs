@@ -45,6 +45,13 @@ use crate::types::*;
 pub use event::ExternalEvent;
 use event::{Event, InternalEvent};
 
+/// Discrete-event simulator that drives the 2PC protocol actors.
+///
+/// Create a simulator with [`new`](Self::new), inject events with
+/// [`enqueue_external`](Self::enqueue_external), then call [`run`](Self::run)
+/// (process all queued events) and [`drain`](Self::drain) (tick-probe for
+/// quiescence). After the run, inspect results via [`coordinator`](Self::coordinator),
+/// [`participants`](Self::participants), and [`log`](Self::log).
 pub struct Simulator {
     coordinator: Coordinator,
     participants: BTreeMap<NodeId, Participant>,
@@ -60,6 +67,12 @@ pub struct Simulator {
 }
 
 impl Simulator {
+    /// Create a simulator with `n_participants` participant nodes.
+    ///
+    /// - `seed` — deterministic RNG seed (controls vote outcomes and delivery jitter).
+    /// - `abort_bias` — coordinator's probability of aborting despite unanimous commit.
+    /// - `delivery_delay` — range of random delay added to each message (0 = instant).
+    /// - `retransmit_timeout` — ticks before the coordinator retransmits.
     pub fn new(
         n_participants: u8,
         seed: u64,
@@ -99,6 +112,7 @@ impl Simulator {
         self.alive.get(&actor).copied().unwrap_or(true)
     }
 
+    /// Schedule an external event for delivery at `at_time`.
     pub fn enqueue_external(&mut self, event: ExternalEvent, at_time: u64) {
         self.event_queue.insert(at_time, Event::External(event));
     }
@@ -304,14 +318,17 @@ impl Simulator {
         false
     }
 
+    /// Reference to the coordinator state machine.
     pub fn coordinator(&self) -> &Coordinator {
         &self.coordinator
     }
 
+    /// Map of participant node IDs to their state machines.
     pub fn participants(&self) -> &BTreeMap<NodeId, Participant> {
         &self.participants
     }
 
+    /// Append-only record of every event processed during this simulation.
     pub fn log(&self) -> &[LogEntry] {
         &self.action_log
     }

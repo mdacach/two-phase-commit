@@ -101,6 +101,8 @@ pub fn check_validity(
     Ok(())
 }
 
+/// Check all safety invariants (agreement + validity). Returns the first
+/// violation found, if any.
 pub fn check_all_invariants(
     coordinator: &Coordinator,
     participants: &BTreeMap<NodeId, Participant>,
@@ -110,6 +112,7 @@ pub fn check_all_invariants(
     Ok(())
 }
 
+/// Returns `true` if every participant has received a decision.
 pub fn all_decided(participants: &BTreeMap<NodeId, Participant>) -> bool {
     participants.values().all(|p| p.decision().is_some())
 }
