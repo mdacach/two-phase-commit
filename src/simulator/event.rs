@@ -2,52 +2,73 @@
 //!
 //! Events are ordered by `(timestamp, sequence_number)`.  The sequence number
 //! breaks ties when multiple events share a timestamp, ensuring FIFO order
-//! among same-time insertions.  This makes simulation runs fully reproducible
-//! given the same seed.
-//!
-//! `TimestampedEvent` has a custom `Ord` (reversed, for min-heap via
-//! `BinaryHeap`) and a custom `PartialEq` that compares only `(timestamp,
-//! sequence_number)`, ignoring the event payload.  This is intentional: the
-//! heap only needs ordering identity, and the payload is consumed on pop.
+//! among same-time insertions allowing easier testing and reproducible runs.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use crate::types::{ActorId, Message};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An event injected into the simulation from outside the protocol.
+///
+/// Crucially, this event is not subject to network faults or delays, as that
+/// would only add debugging noise.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExternalEvent {
+    /// Start a transaction in the 2PC protocol.
+    ///
+    /// This event happens exactly once, at the start of each simulation, and
+    /// triggers the coordinator to start its messaging.
     StartTransaction,
+    /// Advance a single actor's simulated clock by one.
     Tick { to: ActorId },
+    /// Advance every actor's clock by one.
     TickAll,
+    /// Crash an actor.
+    ///
+    /// Messages delivered to crashed actors are dropped, and actor is
+    /// un-operational until it's recovered.
     Crash(ActorId),
+    /// Recover an actor.
+    ///
+    /// Triggers the [`recover`](crate::state_machine::StateMachine::recover) method,
+    /// which recovers state based in durable storage.
     Recover(ActorId),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum InternalEvent {
     Deliver { to: ActorId, msg: Message },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Event {
     External(ExternalEvent),
     Internal(InternalEvent),
 }
 
+/// An event tagged with its delivery time and insertion order.
+///
+/// `Eq`/`Ord` compare all three fields (timestamp, sequence number, and event
+/// payload) so that the ordering is fully deterministic even if two events
+/// were hypothetically assigned the same sequence number.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TimestampedEvent {
     timestamp: u64,
     sequence_number: u64,
     event: Event,
 }
 
-// Reversed ordering to make BinaryHeap behave as a min-heap.
+/// Natural ordering is `(timestamp, sequence_number, event)`, reversed so
+/// that `BinaryHeap` (a max-heap) pops the *smallest* timestamp first,
+/// giving us min-heap semantics.
 impl Ord for TimestampedEvent {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .timestamp
-            .cmp(&self.timestamp)
-            .then(other.sequence_number.cmp(&self.sequence_number))
+        self.timestamp
+            .cmp(&other.timestamp)
+            .then(self.sequence_number.cmp(&other.sequence_number))
+            .then(self.event.cmp(&other.event))
+            .reverse()
     }
 }
 
@@ -57,16 +78,11 @@ impl PartialOrd for TimestampedEvent {
     }
 }
 
-impl PartialEq for TimestampedEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp && self.sequence_number == other.sequence_number
-    }
-}
-
-impl Eq for TimestampedEvent {}
-
 pub(crate) struct EventQueue {
     queue: BinaryHeap<TimestampedEvent>,
+    /// Monotonically increasing counter assigned to each inserted event.
+    /// Breaks ties between events at the same timestamp, preserving FIFO
+    /// insertion order and ensuring fully deterministic simulation runs.
     next_sequence_number: u64,
 }
 
@@ -79,6 +95,8 @@ impl EventQueue {
     }
 
     pub(crate) fn insert(&mut self, timestamp: u64, event: Event) {
+        // Tag with a unique, monotonically increasing sequence number so that
+        // events at the same timestamp are popped in insertion (FIFO) order.
         let seq = self.next_sequence_number;
         self.next_sequence_number += 1;
         self.queue.push(TimestampedEvent {
