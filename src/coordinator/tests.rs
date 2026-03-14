@@ -182,7 +182,7 @@ fn retransmit_decision_on_timeout() {
 #[test]
 fn recover_with_decision() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
-    coord.wal.decision = Some(Decision::Commit);
+    coord.durable_state.decision = Some(Decision::Commit);
     coord.recover(10);
     assert_eq!(coord.phase(), CoordinatorPhase::Decided(Decision::Commit));
     assert!(coord.acks.is_empty());
