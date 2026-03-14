@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>2PC Trace Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #333; }
+
+/* Header */
+header { padding: 14px 24px; background: #fff; border-bottom: 1px solid #e0e0e0; }
+h1 { font-size: 17px; font-weight: 600; margin-bottom: 10px; color: #555; }
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+select { padding: 5px 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.controls button {
+  padding: 4px 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px;
+  background: #fff; cursor: pointer; color: #555;
+}
+.controls button:hover { background: #f0f0f0; }
+.controls button.active { background: #e8f4e8; border-color: #8c8; color: #363; }
+.step-info { font-size: 15px; font-variant-numeric: tabular-nums; color: #555; min-width: 120px; text-align: center; }
+.speed { font-size: 12px; color: #999; }
+.hint { font-size: 11px; color: #bbb; margin-left: auto; }
+
+/* Legend */
+#legend {
+  padding: 8px 24px; font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid #eee; background: #fefefe; color: #666;
+}
+#legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+
+/* Detail bar */
+#detail {
+  padding: 10px 24px; font-size: 14px; color: #666; background: #f5f5f5;
+  border-bottom: 1px solid #eee; min-height: 38px; display: flex; align-items: center;
+  font-family: ui-monospace, monospace; transition: color .15s;
+}
+#detail.outcome { color: #2c3e50; font-weight: 600; }
+
+/* SVG container */
+#svg-wrap { overflow-x: auto; padding: 20px 0; }
+svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+
+/* Entry states */
+.entry { transition: opacity .12s ease; cursor: pointer; }
+.entry.future { opacity: 0; pointer-events: none; }
+.entry.past { opacity: .45; }
+.entry.past line, .entry.past circle { opacity: .3; }
+.entry.past text { opacity: .55; }
+.entry.current { opacity: 1; }
+
+/* Hover: show at full opacity */
+.entry:hover:not(.future) { opacity: 1 !important; }
+.entry:hover:not(.future) line,
+.entry:hover:not(.future) circle { opacity: 1 !important; }
+.entry:hover:not(.future) text { opacity: 1 !important; }
+
+/* Arrow drawing animation (forward steps only) */
+.entry.anim line.arrow {
+  animation: drawLine .28s ease-out forwards;
+}
+@keyframes drawLine {
+  from { stroke-dashoffset: var(--len); }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Tooltip */
+#tip {
+  display: none; position: fixed; pointer-events: none; z-index: 100;
+  background: #333; color: #fff; padding: 8px 12px; border-radius: 6px;
+  font-size: 12px; line-height: 1.5; max-width: 320px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.25); white-space: pre-line;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Two-Phase Commit &mdash; Trace Viewer</h1>
+  <div class="controls">
+    <select id="sel"></select>
+    <button id="btnPrev" title="Previous step">&lsaquo;</button>
+    <span class="step-info" id="info">Step &ndash;</span>
+    <button id="btnNext" title="Next step">&rsaquo;</button>
+    <button id="btnPlay" title="Play/Pause">&#9654; Play</button>
+    <span class="speed" id="speedLabel">500ms</span>
+    <span class="hint">&larr;&rarr; step &middot; Shift+&rarr; by time &middot; Space play &middot; +/&minus; speed &middot; Home/End</span>
+  </div>
+</header>
+<div id="legend"></div>
+<div id="detail">Press &rarr; to begin</div>
+<div id="svg-wrap"><svg id="d"></svg></div>
+<div id="tip"></div>
+
+<script>
+// ---- Data & constants ----
+const T = __DATA__;
+const COLORS = {
+  Prepare: '#4A90D9', VoteCommit: '#27AE60', VoteAbort: '#E74C3C',
+  DecisionCommit: '#8E44AD', DecisionAbort: '#E67E22', Ack: '#95A5A6'
+};
+const LABELS = {
+  Prepare: 'Prepare', VoteCommit: 'Vote yes', VoteAbort: 'Vote no',
+  DecisionCommit: 'Commit!', DecisionAbort: 'Abort!', Ack: 'Ack'
+};
+const M = { t: 60, l: 72, r: 36, b: 24 };
+const CW = 180, RH = 44;
+
+// ---- State ----
+let curScenario = 0, cur = -1, prevStep = -1;
+let steps = [], filt = [], tsGroups = [];
+let playing = false, playSpeed = 500, playTimer = null;
+
+// ---- Helpers ----
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+function mk(tag, a) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(a || {})) e.setAttribute(k, v);
+  return e;
+}
+function tx(s, x, y, a) {
+  const t = mk('text', { x, y, ...a }); t.textContent = s; return t;
+}
+
+// ---- Legend ----
+(function buildLegend() {
+  const lg = $('legend');
+  const items = [
+    ['#4A90D9', '\u25CF', 'Prepare'], ['#27AE60', '\u25CF', 'Vote yes'],
+    ['#E74C3C', '\u25CF', 'Vote no'], ['#8E44AD', '\u25CF', 'Commit!'],
+    ['#E67E22', '\u25CF', 'Abort!'], ['#95A5A6', '\u25CF', 'Ack'],
+    ['#dc3545', '\u2715', 'Dropped'], ['', '\u26A1', 'Crash'],
+    ['#28a745', '\u21BA', 'Recover'],
+  ];
+  items.forEach(([c, sym, label]) => {
+    const s = document.createElement('span');
+    s.innerHTML = `<span style="color:${c||'inherit'}">${sym}</span> ${label}`;
+    lg.appendChild(s);
+  });
+})();
+
+// ---- Scenario dropdown ----
+const sel = $('sel');
+T.forEach((s, i) => {
+  const o = document.createElement('option'); o.value = i; o.textContent = s.name;
+  sel.appendChild(o);
+});
+sel.onchange = () => { stopPlay(); load(+sel.value); };
+
+// ---- Keyboard ----
+document.onkeydown = e => {
+  if (e.target.tagName === 'SELECT') return;
+  switch (e.key) {
+    case 'ArrowRight':
+      e.shiftKey ? go(tsStep(1)) : go(cur + 1); e.preventDefault(); break;
+    case 'ArrowLeft':
+      e.shiftKey ? go(tsStep(-1)) : go(cur - 1); e.preventDefault(); break;
+    case 'Home': go(-1); e.preventDefault(); break;
+    case 'End': go(filt.length - 1); e.preventDefault(); break;
+    case ' ': togglePlay(); e.preventDefault(); break;
+    case '+': case '=': changeSpeed(-100); e.preventDefault(); break;
+    case '-': case '_': changeSpeed(100); e.preventDefault(); break;
+  }
+};
+
+// ---- Buttons ----
+$('btnPrev').onclick = () => go(cur - 1);
+$('btnNext').onclick = () => go(cur + 1);
+$('btnPlay').onclick = () => togglePlay();
+
+// ---- Playback ----
+function togglePlay() {
+  if (playing) { stopPlay(); }
+  else {
+    playing = true;
+    $('btnPlay').innerHTML = '\u23F8 Pause';
+    $('btnPlay').classList.add('active');
+    playTimer = setInterval(() => {
+      if (cur >= filt.length - 1) { stopPlay(); return; }
+      go(cur + 1);
+    }, playSpeed);
+  }
+}
+function stopPlay() {
+  playing = false; clearInterval(playTimer);
+  $('btnPlay').innerHTML = '\u25B6 Play';
+  $('btnPlay').classList.remove('active');
+}
+function changeSpeed(delta) {
+  playSpeed = Math.max(50, Math.min(2000, playSpeed + delta));
+  $('speedLabel').textContent = playSpeed + 'ms';
+  if (playing) { stopPlay(); togglePlay(); } // restart with new speed
+}
+
+// ---- Timestamp grouping (Shift+Arrow) ----
+function tsStep(dir) {
+  if (tsGroups.length === 0) return cur;
+  let gi = tsGroups.findIndex(g => cur >= g.s && cur <= g.e);
+  if (gi < 0) gi = dir > 0 ? -1 : tsGroups.length;
+  const target = gi + dir;
+  if (target < 0) return -1;
+  if (target >= tsGroups.length) return filt.length - 1;
+  return tsGroups[target].e;
+}
+
+// ---- Tooltip ----
+const tip = $('tip');
+function showTip(e, evt) {
+  const l = LABELS[e.msg] || '';
+  let t = '';
+  switch (e.kind) {
+    case 'send':    t = `${e.from} \u2192 ${e.to}\n${l}\nSent t=${e.at}, arrives t=${e.deliver_at}`; break;
+    case 'deliver': t = `${e.to} receives ${l}\nfrom ${e.from} at t=${e.at}`; break;
+    case 'drop':    t = `${l}: ${e.from} \u2192 ${e.to}\nDROPPED at t=${e.at}\n(${e.to} is dead)`; break;
+    case 'crash':   t = `${e.actor} crashes at t=${e.at}`; break;
+    case 'recover': t = `${e.actor} recovers at t=${e.at}`; break;
+    case 'event':   t = `${e.label} at t=${e.at}`; break;
+  }
+  tip.textContent = t;
+  tip.style.display = 'block';
+  moveTip(evt);
+}
+function moveTip(evt) {
+  tip.style.left = (evt.clientX + 14) + 'px';
+  tip.style.top = (evt.clientY + 14) + 'px';
+}
+function hideTip() { tip.style.display = 'none'; }
+
+// ---- Load scenario ----
+function load(idx) {
+  curScenario = idx; cur = -1; prevStep = -1;
+  const sc = T[idx];
+  filt = sc.entries.filter(e => e.kind !== 'tick');
+
+  // Unique sorted timestamps
+  const ts = new Set();
+  filt.forEach(e => { ts.add(e.at); if (e.deliver_at != null) ts.add(e.deliver_at); });
+  const times = [...ts].sort((a, b) => a - b);
+  const ti = Object.fromEntries(times.map((t, i) => [t, i]));
+
+  // Timestamp groups for Shift+Arrow
+  tsGroups = [];
+  if (filt.length > 0) {
+    let gs = 0;
+    for (let i = 1; i <= filt.length; i++) {
+      if (i === filt.length || filt[i].at !== filt[gs].at) {
+        tsGroups.push({ s: gs, e: i - 1 });
+        gs = i;
+      }
+    }
+  }
+
+  const nc = sc.actors.length, nr = times.length;
+  const ci = Object.fromEntries(sc.actors.map((a, i) => [a, i]));
+  const cx = i => M.l + i * CW + CW / 2;
+
+  // Variable row heights: extra gap when time jumps > 2
+  const rowY = [];
+  const gapBefore = new Set();
+  let yy = M.t;
+  for (let i = 0; i < nr; i++) {
+    if (i > 0 && times[i] - times[i - 1] > 2) { yy += 14; gapBefore.add(i); }
+    rowY.push(yy + RH / 2);
+    yy += RH;
+  }
+  const W = M.l + nc * CW + M.r;
+  const H = yy + M.b;
+  const ry = i => rowY[i];
+
+  const d = $('d');
+  d.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  d.setAttribute('width', W);
+  d.innerHTML = '';
+
+  // Arrow markers
+  const defs = mk('defs');
+  for (const [n, c] of Object.entries(COLORS)) {
+    const m = mk('marker', {
+      id: 'a-' + n, viewBox: '0 0 10 10', refX: 9, refY: 5,
+      markerWidth: 6, markerHeight: 6, orient: 'auto'
+    });
+    m.appendChild(mk('path', { d: 'M0,1L9,5L0,9z', fill: c }));
+    defs.appendChild(m);
+  }
+  d.appendChild(defs);
+
+  // Grid lines
+  for (let i = 0; i < nr; i++) {
+    d.appendChild(mk('line', {
+      x1: M.l, y1: ry(i), x2: W - M.r, y2: ry(i), stroke: '#f0f0f0', 'stroke-width': 1
+    }));
+    d.appendChild(tx('t=' + times[i], M.l - 10, ry(i), {
+      'font-size': 13, fill: '#bbb', 'text-anchor': 'end', 'dominant-baseline': 'central',
+      'font-family': 'ui-monospace, monospace'
+    }));
+  }
+
+  // Time-gap indicators
+  gapBefore.forEach(i => {
+    const midY = (rowY[i - 1] + rowY[i]) / 2;
+    d.appendChild(tx('\u22EE', M.l - 10, midY, {
+      'font-size': 16, fill: '#ccc', 'text-anchor': 'end', 'dominant-baseline': 'central'
+    }));
+    d.appendChild(mk('line', {
+      x1: M.l, y1: midY, x2: W - M.r, y2: midY,
+      stroke: '#e8e8e8', 'stroke-width': 1, 'stroke-dasharray': '3 3'
+    }));
+  });
+
+  // Actor lanes
+  for (let i = 0; i < nc; i++) {
+    d.appendChild(mk('line', {
+      x1: cx(i), y1: M.t - 8, x2: cx(i), y2: H - M.b, stroke: '#e0e0e0', 'stroke-width': 1
+    }));
+    d.appendChild(tx(sc.actors[i], cx(i), M.t - 26, {
+      'font-size': 15, 'font-weight': 600, fill: '#444', 'text-anchor': 'middle'
+    }));
+  }
+
+  // Dead zones (crash→recover shading)
+  const crashAt = {};
+  filt.forEach(e => {
+    if (e.kind === 'crash') crashAt[e.actor] = ti[e.at];
+    if (e.kind === 'recover' && crashAt[e.actor] != null) {
+      const c0 = ci[e.actor];
+      const y1 = ry(crashAt[e.actor]) - RH / 2, y2 = ry(ti[e.at]) + RH / 2;
+      d.appendChild(mk('rect', {
+        x: cx(c0) - 20, y: y1, width: 40, height: y2 - y1,
+        fill: '#dc3545', opacity: .05, rx: 4
+      }));
+      delete crashAt[e.actor];
+    }
+  });
+
+  // Phase boundary lines at crash/recover timestamps
+  filt.forEach(e => {
+    if (e.kind === 'crash' || e.kind === 'recover') {
+      const y = ry(ti[e.at]);
+      const color = e.kind === 'crash' ? '#dc354540' : '#28a74540';
+      d.appendChild(mk('line', {
+        x1: M.l - 5, y1: y, x2: W - M.r + 5, y2: y,
+        stroke: color, 'stroke-width': 1, 'stroke-dasharray': '6 4'
+      }));
+    }
+  });
+
+  // Track concurrent sends from same source for label offset
+  const sendOff = {};
+
+  // Entries
+  steps = [];
+  filt.forEach((e, idx) => {
+    const g = mk('g', { class: 'entry future', 'data-kind': e.kind });
+
+    switch (e.kind) {
+      case 'send': {
+        const x1 = cx(ci[e.from]), y1 = ry(ti[e.at]);
+        const x2 = cx(ci[e.to]),   y2 = ry(ti[e.deliver_at]);
+        const c = COLORS[e.msg] || '#999';
+        const len = Math.hypot(x2 - x1, y2 - y1);
+        const line = mk('line', {
+          x1, y1, x2, y2, stroke: c, 'stroke-width': 2.2,
+          'marker-end': 'url(#a-' + e.msg + ')', class: 'arrow'
+        });
+        line.style.strokeDasharray = len;
+        line.style.strokeDashoffset = 0;
+        line.style.setProperty('--len', len);
+        g.appendChild(line);
+        g.appendChild(mk('circle', { cx: x1, cy: y1, r: 3.5, fill: c }));
+        // Label with stagger for concurrent sends
+        const sk = e.from + ':' + e.at;
+        const off = (sendOff[sk] || 0) * 13;
+        sendOff[sk] = (sendOff[sk] || 0) + 1;
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, right = x2 > x1;
+        g.appendChild(tx(LABELS[e.msg] || e.msg, mx + (right ? 12 : -12), my - 6 + off, {
+          'font-size': 12, fill: c, 'text-anchor': right ? 'start' : 'end'
+        }));
+        break;
+      }
+      case 'deliver': {
+        const x = cx(ci[e.to]), y = ry(ti[e.at]), c = COLORS[e.msg] || '#999';
+        g.appendChild(mk('circle', {
+          cx: x, cy: y, r: 5.5, fill: c, stroke: '#fff', 'stroke-width': 1.5
+        }));
+        break;
+      }
+      case 'drop': {
+        const x = cx(ci[e.to]), y = ry(ti[e.at]), s = 6;
+        g.appendChild(mk('line', {
+          x1: x - s, y1: y - s, x2: x + s, y2: y + s,
+          stroke: '#dc3545', 'stroke-width': 3, 'stroke-linecap': 'round'
+        }));
+        g.appendChild(mk('line', {
+          x1: x - s, y1: y + s, x2: x + s, y2: y - s,
+          stroke: '#dc3545', 'stroke-width': 3, 'stroke-linecap': 'round'
+        }));
+        break;
+      }
+      case 'crash': {
+        const x = cx(ci[e.actor]), y = ry(ti[e.at]);
+        g.appendChild(tx('\u26A1', x, y, {
+          'font-size': 20, 'text-anchor': 'middle', 'dominant-baseline': 'central'
+        }));
+        g.appendChild(tx('CRASH', x + 20, y, {
+          'font-size': 12, fill: '#dc3545', 'dominant-baseline': 'central', 'font-weight': 700
+        }));
+        break;
+      }
+      case 'recover': {
+        const x = cx(ci[e.actor]), y = ry(ti[e.at]);
+        g.appendChild(tx('\u21BA', x, y, {
+          'font-size': 20, fill: '#28a745', 'text-anchor': 'middle', 'dominant-baseline': 'central'
+        }));
+        g.appendChild(tx('RECOVER', x + 20, y, {
+          'font-size': 12, fill: '#28a745', 'dominant-baseline': 'central', 'font-weight': 700
+        }));
+        break;
+      }
+      case 'event': {
+        const x = cx(ci[e.actor]), y = ry(ti[e.at]);
+        g.appendChild(mk('circle', {
+          cx: x, cy: y, r: 6, fill: '#2c3e50', stroke: '#fff', 'stroke-width': 1.5
+        }));
+        g.appendChild(tx('Start', x + 14, y, {
+          'font-size': 12, fill: '#2c3e50', 'dominant-baseline': 'central'
+        }));
+        break;
+      }
+    }
+
+    // Hover → tooltip
+    g.addEventListener('mouseenter', evt => showTip(e, evt));
+    g.addEventListener('mousemove', moveTip);
+    g.addEventListener('mouseleave', hideTip);
+    // Click → jump to step
+    g.addEventListener('click', () => { stopPlay(); go(idx); });
+
+    d.appendChild(g);
+    steps.push(g);
+  });
+
+  go(readHash().scenario === idx ? readHash().step : -1);
+}
+
+// ---- Description text ----
+function desc(e) {
+  const l = LABELS[e.msg] || e.msg || '';
+  switch (e.kind) {
+    case 'send':    return `t=${e.at}  ${e.from} \u2192 ${e.to}: ${l}  (arrives t=${e.deliver_at})`;
+    case 'deliver': return `t=${e.at}  ${e.to} receives ${l} from ${e.from}`;
+    case 'drop':    return `t=${e.at}  ${l} to ${e.to}: DROPPED (${e.to} is dead)`;
+    case 'crash':   return `t=${e.at}  ${e.actor} crashes`;
+    case 'recover': return `t=${e.at}  ${e.actor} recovers from crash`;
+    case 'event':   return `t=${e.at}  ${e.label || 'event'}`;
+    default: return '';
+  }
+}
+
+function outcomeText() {
+  const r = T[curScenario].result;
+  if (!r || !r.coordinator) return '';
+  const parts = r.participants.map(p =>
+    `${p.id}: ${p.decision || '\u2013'}`
+  ).join(', ');
+  return `Outcome: ${r.coordinator}  \u00B7  ${parts}`;
+}
+
+// ---- Step management ----
+function go(s) {
+  const prev = cur;
+  s = Math.max(-1, Math.min(s, filt.length - 1));
+  cur = s;
+  const last = s === filt.length - 1;
+  const forward = s > prev;
+
+  steps.forEach((el, i) => {
+    el.classList.remove('past', 'current', 'future', 'anim');
+    if (last || i === s) {
+      el.classList.add('current');
+      if (forward && i === s && !last) el.classList.add('anim');
+    } else if (i < s) {
+      el.classList.add('past');
+    } else {
+      el.classList.add('future');
+    }
+  });
+
+  $('info').textContent = s < 0
+    ? `Step \u2013 / ${filt.length}`
+    : `Step ${s + 1} / ${filt.length}`;
+
+  const detail = $('detail');
+  if (s < 0) {
+    detail.textContent = 'Press \u2192 to begin';
+    detail.classList.remove('outcome');
+  } else if (last) {
+    detail.textContent = outcomeText() || desc(filt[s]);
+    detail.classList.add('outcome');
+  } else {
+    detail.textContent = desc(filt[s]);
+    detail.classList.remove('outcome');
+  }
+
+  writeHash();
+}
+
+// ---- URL hash ----
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  return { scenario: parseInt(p.get('s') || '0'), step: parseInt(p.get('t') || '-1') };
+}
+function writeHash() {
+  history.replaceState(null, '', `#s=${curScenario}&t=${cur}`);
+}
+window.addEventListener('hashchange', () => {
+  const h = readHash();
+  if (h.scenario !== curScenario) { sel.value = h.scenario; load(h.scenario); }
+  else if (h.step !== cur) go(h.step);
+});
+
+// ---- Init ----
+const init = readHash();
+sel.value = init.scenario;
+load(init.scenario);
+</script>
+</body>
+</html>
