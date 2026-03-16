@@ -177,3 +177,23 @@ detection, Segala (quiescence/fairness/testing).
 | 47 | 1–6 | Significant changes needed; move property checks to simulator; simulator should track votes | **Stale.** The concerns were addressed in rounds 1–2: `check_validity` now checks both coordinator vote records (when available) and participant vote records (always available) as ground truth. The simulator already calls `check_all_invariants` after every step. Removed the 6-line REVIEW block. | Removed |
 | 48 | 57 | Empty `// REVIEW:` marker | **Stale.** Leftover from a previous round. Removed. | Removed |
 | 49 | 64–66 | Simulator must track votes so commit-validity survives coordinator crash | **Agree.** Added `observed_votes: BTreeMap<NodeId, Vote>` to `Simulator`, recorded in `enqueue_outgoing` when VoteCommit/VoteAbort messages are sent. `check_validity` now takes `observed_votes` from the simulator instead of reading the coordinator's volatile vote map. The manual test in `tests/simulation.rs` builds observed votes from the known input. | Fixed |
+
+## Round 5
+
+### coordinator.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 50 | 120 | Move votes and acks to inside the coordinator phase | **Agree.** Now that the simulator tracks wire-level observations for property checking, the coordinator's votes and acks no longer need to be externally accessible. Moved `votes: BTreeMap<NodeId, Vote>` into `Voting` and `acks: BTreeSet<NodeId>` into `AwaitingAcks`. Removed `Copy` derive from `CoordinatorPhase` (collections aren't `Copy`); `phase()` now returns `&CoordinatorPhase`. Removed the `votes()` public accessor. The `on_message` match was restructured from `match (msg_type, self.phase)` (which relied on `Copy`) to `match msg.message_type` with `matches!()` guards. `tick()` uses sequential `if let` blocks with in-place timestamp updates (`*last_prepare_time = at_time`) instead of reconstructing the entire phase variant. `recover()` is cleaner — no explicit `clear()` calls needed since the old phase (with its collections) is simply dropped on reassignment. | Fixed |
+
+### participant.rs
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 51 | 235 | Explain why tick is no-op | **Agree.** Added doc comment: the participant is purely reactive — it has no retransmission timer and no spontaneous actions, producing messages only in response to Prepare or Decision from the coordinator. | Fixed |
+
+### participant/tests.rs, examples, README
+
+| # | Line | Review | Assessment | Status |
+|---|------|--------|------------|--------|
+| 52 | tests:3 | Update remaining "WAL" references to "durable state" | **Agree.** Review #35 renamed the `Wal` struct to `DurableState` but left stale "WAL" wording in comments and prose. Updated: `participant/tests.rs` (2 comments), `examples/scenarios/mod.rs` (2 doc comments), `README.md` (1 paragraph). Spec and plan files left unchanged as historical records. | Fixed |
