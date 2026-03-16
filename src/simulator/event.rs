@@ -95,8 +95,6 @@ impl EventQueue {
     }
 
     pub(crate) fn insert(&mut self, timestamp: u64, event: Event) {
-        // Tag with a unique, monotonically increasing sequence number so that
-        // events at the same timestamp are popped in insertion (FIFO) order.
         let seq = self.next_sequence_number;
         self.next_sequence_number += 1;
         self.queue.push(TimestampedEvent {

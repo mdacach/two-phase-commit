@@ -9,7 +9,7 @@
 //!            │ Decision(X)             │ Decision(X)
 //!            │ (before voting)         │
 //!            v                         v
-//!  ┌─────────────────┐   ┌─────────────────────┐
+//!  ┌─────────────────┐   ┌─────────────────────—┐
 //!  │ Decided         │   │ Decided              │
 //!  │   vote: None    │   │   vote: Some(v)      │
 //!  │   decision: X   │   │   decision: X        │
@@ -108,7 +108,6 @@ impl Participant {
     }
 
     /// Create a participant with a deterministic vote.
-    /// `Commit` → `abort_bias = 0.0`, `Abort` → `abort_bias = 1.0`.
     pub fn with_fixed_vote(id: NodeId, vote: Vote) -> Self {
         let abort_bias = match vote {
             Vote::Commit => 0.0,
@@ -233,6 +232,10 @@ impl StateMachine for Participant {
         outgoing
     }
 
+    /// No-op: the participant is purely reactive. Unlike the coordinator, it
+    /// has no retransmission timer and no spontaneous actions — it only
+    /// produces messages in response to Prepare or Decision from the
+    /// coordinator.
     fn tick(&mut self, _at_time: u64) -> Vec<Message> {
         vec![]
     }

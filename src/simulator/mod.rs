@@ -78,6 +78,7 @@ pub struct Simulator {
     /// collected during simulation for property checking.
     observations: Observations,
     /// Append-only record of every event processed and message sent.
+    /// Used for visualization.
     action_log: Vec<LogEntry>,
 }
 
@@ -135,8 +136,8 @@ impl Simulator {
 
     /// Schedule an external event for delivery at `at_time`.
     ///
-    /// External events are not subject to delivery randomness — that would only
-    /// add noise.
+    /// External events are not subject to delivery randomness, as that would
+    /// only add noise.
     pub fn enqueue_external(&mut self, event: ExternalEvent, at_time: u64) {
         self.event_queue.insert(at_time, Event::External(event));
     }
