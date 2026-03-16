@@ -82,7 +82,7 @@ fn recover_after_decision_restores_decided() {
     p.on_message(&dec, 1);
     assert_eq!(p.decision(), Some(Decision::Commit));
 
-    // WAL has both vote and decision — recover restores Decided.
+    // Durable state has both vote and decision — recover restores Decided.
     p.recover(5);
     assert_eq!(p.decision(), Some(Decision::Commit));
     assert_eq!(p.vote(), Some(Vote::Commit));
@@ -94,7 +94,7 @@ fn recover_after_vote_restores_voted() {
     p.on_message(&prepare_msg(NodeId(0)), 0);
     assert_eq!(p.phase(), ParticipantPhase::Voted(Vote::Commit));
 
-    // WAL has vote but no decision — recover restores Voted.
+    // Durable state has vote but no decision — recover restores Voted.
     p.recover(5);
     assert_eq!(p.phase(), ParticipantPhase::Voted(Vote::Commit));
     assert_eq!(p.decision(), None);

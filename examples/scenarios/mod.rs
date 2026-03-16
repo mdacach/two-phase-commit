@@ -88,7 +88,7 @@ fn coordinator_crash_before_decision() -> Scenario {
 
 /// Coordinator decides and sends Decision, then crashes before receiving Acks.
 /// Acks in flight are dropped. After recovery the coordinator re-enters
-/// Decided (from WAL), retransmits Decision, re-collects Acks, and completes.
+/// Decided (from durable state), retransmits Decision, re-collects Acks, and completes.
 fn coordinator_crash_after_decision() -> Scenario {
     let mut sim = Simulator::new(2, 1, 0.0, 0.2, 0..0, 5);
     sim.enqueue_external(ExternalEvent::StartTransaction, 0);
@@ -106,7 +106,7 @@ fn coordinator_crash_after_decision() -> Scenario {
 
 /// A participant crashes after voting but before receiving the Decision.
 /// The coordinator decides normally, but the Decision to the dead participant
-/// is dropped. After recovery the participant is back in Voted (from WAL);
+/// is dropped. After recovery the participant is back in Voted (from durable state);
 /// the coordinator retransmits Decision, the participant Acks, and the
 /// protocol completes.
 fn participant_crash_after_voting() -> Scenario {
