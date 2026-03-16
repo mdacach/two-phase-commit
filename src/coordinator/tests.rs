@@ -14,9 +14,10 @@ fn start_transaction_sends_prepare() {
     };
     let msgs = coord.on_message(&start, 0);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::Voting {
-            last_prepare_time: 0
+            last_prepare_time: 0,
+            votes: BTreeMap::new(),
         }
     );
     assert_eq!(msgs.len(), 2);
@@ -28,6 +29,7 @@ fn all_commit_votes_enters_awaiting_acks() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
     coord.phase = CoordinatorPhase::Voting {
         last_prepare_time: 0,
+        votes: BTreeMap::new(),
     };
 
     let vote0 = Message {
@@ -45,10 +47,11 @@ fn all_commit_votes_enters_awaiting_acks() {
     };
     let msgs = coord.on_message(&vote1, 2);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::AwaitingAcks {
             decision: Decision::Commit,
-            last_decision_time: 2
+            last_decision_time: 2,
+            acks: BTreeSet::new(),
         }
     );
     assert_eq!(coord.decision(), Some(Decision::Commit));
@@ -64,6 +67,7 @@ fn abort_vote_enters_awaiting_acks() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
     coord.phase = CoordinatorPhase::Voting {
         last_prepare_time: 0,
+        votes: BTreeMap::new(),
     };
 
     let vote = Message {
@@ -73,10 +77,11 @@ fn abort_vote_enters_awaiting_acks() {
     };
     let msgs = coord.on_message(&vote, 1);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::AwaitingAcks {
             decision: Decision::Abort,
-            last_decision_time: 1
+            last_decision_time: 1,
+            acks: BTreeSet::new(),
         }
     );
     assert_eq!(coord.decision(), Some(Decision::Abort));
@@ -94,10 +99,11 @@ fn tick_decided_sends_decision_messages() {
 
     let msgs = coord.tick(0);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::AwaitingAcks {
             decision: Decision::Commit,
-            last_decision_time: 0
+            last_decision_time: 0,
+            acks: BTreeSet::new(),
         }
     );
     assert_eq!(msgs.len(), 2);
@@ -113,6 +119,7 @@ fn acks_complete_protocol() {
     coord.phase = CoordinatorPhase::AwaitingAcks {
         decision: Decision::Commit,
         last_decision_time: 0,
+        acks: BTreeSet::new(),
     };
 
     let ack0 = Message {
@@ -135,7 +142,7 @@ fn acks_complete_protocol() {
         to: ActorId::Coordinator,
     };
     coord.on_message(&ack1, 2);
-    assert_eq!(coord.phase(), CoordinatorPhase::Done(Decision::Commit));
+    assert_eq!(*coord.phase(), CoordinatorPhase::Done(Decision::Commit));
 }
 
 #[test]
@@ -143,10 +150,8 @@ fn retransmit_prepare_on_timeout() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
     coord.phase = CoordinatorPhase::Voting {
         last_prepare_time: 0,
+        votes: BTreeMap::from([(NodeId(0), Vote::Commit)]),
     };
-
-    // Record one vote so only the other node gets retransmit.
-    coord.votes.insert(NodeId(0), Vote::Commit);
 
     // Before timeout: no retransmit.
     let msgs = coord.tick(4);
@@ -165,10 +170,8 @@ fn retransmit_decision_on_timeout() {
     coord.phase = CoordinatorPhase::AwaitingAcks {
         decision: Decision::Commit,
         last_decision_time: 0,
+        acks: BTreeSet::from([NodeId(0)]),
     };
-
-    // Record one ack.
-    coord.acks.insert(NodeId(0));
 
     let msgs = coord.tick(4);
     assert!(msgs.is_empty());
@@ -184,17 +187,17 @@ fn recover_with_decision() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
     coord.durable_state.decision = Some(Decision::Commit);
     coord.recover(10);
-    assert_eq!(coord.phase(), CoordinatorPhase::Decided(Decision::Commit));
-    assert!(coord.acks.is_empty());
+    assert_eq!(*coord.phase(), CoordinatorPhase::Decided(Decision::Commit));
 
     // Next tick should send decisions.
     let msgs = coord.tick(10);
     assert_eq!(msgs.len(), 2);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::AwaitingAcks {
             decision: Decision::Commit,
-            last_decision_time: 10
+            last_decision_time: 10,
+            acks: BTreeSet::new(),
         }
     );
 }
@@ -204,12 +207,12 @@ fn recover_without_decision() {
     let mut coord = Coordinator::new(two_nodes(), 0, 0.0, 5);
     coord.recover(10);
     assert_eq!(
-        coord.phase(),
+        *coord.phase(),
         CoordinatorPhase::Voting {
-            last_prepare_time: 5
+            last_prepare_time: 5,
+            votes: BTreeMap::new(),
         }
     );
-    assert!(coord.votes.is_empty());
 
     // Next tick should retransmit Prepare.
     let msgs = coord.tick(10);
