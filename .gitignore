@@ -1,1 +1,7 @@
 .DS_Store
+.idea/
+target/
+scratch/
+assessments/
+FLASHCARDS.md
+.specs/2pc-alloy/learning/

@@ -13,8 +13,8 @@ not a port of the TLA+ spec.
 N/A.
 
 ## Goals
-- [ ] Create an Alloy 6 specification for two-phase commit (no-failure model).
-- [ ] Research and report on changes needed to cover failure modes.
+- [x] Create an Alloy 6 specification for two-phase commit (no-failure model).
+- [x] Research and report on changes needed to cover failure modes.
 
 ## Non-Goals
 N/A.
@@ -86,11 +86,11 @@ Check properties for multiple sensible scopes (e.g., 2, 3, 4 participants).
 | Any participant votes abort | Coordinator decides abort, sends abort to all |
 
 ## Acceptance Criteria
-- [ ] Reasoned through examples with /alloy-cli.
-- [ ] All safety and liveness properties pass across multiple scopes.
-- [ ] Specification follows Alloy 6 best practices (idiomatic style).
-- [ ] Event reification works in the visualizer.
-- [ ] Research report on failure mode extensions delivered.
+- [x] Reasoned through examples with /alloy-cli.
+- [x] All safety and liveness properties pass across multiple scopes.
+- [x] Specification follows Alloy 6 best practices (idiomatic style).
+- [x] Event reification works in the visualizer.
+- [x] Research report on failure mode extensions delivered.
 
 ### How to Verify
 The /alloy-cli skill allows you to run alloy commands on the command line.

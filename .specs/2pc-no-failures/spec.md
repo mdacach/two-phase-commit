@@ -11,7 +11,7 @@ This will be the first specification in this project, nothing exists yet.
 N/A.
 
 ## Goals
-- [ ] Create a TLA+ specification for two-phase commit, without accounting for failures.
+- [x] Create a TLA+ specification for two-phase commit, without accounting for failures.
 
 ## Non-Goals
 - Not writing any code.
@@ -73,10 +73,10 @@ Raw TLA+ (no PlusCal).
 | Single participant in the system | Protocol still completes correctly |
 
 ## Acceptance Criteria
-- [ ] TLC checks the spec without errors for the configured number of participants
-- [ ] Safety: all participants that have decided hold the same decision value
-- [ ] Consistency: COMMIT decision only occurs when all votes were VOTE_COMMIT
-- [ ] Liveness: the protocol eventually terminates with all participants decided
+- [x] TLC checks the spec without errors for the configured number of participants
+- [x] Safety: all participants that have decided hold the same decision value
+- [x] Consistency: COMMIT decision only occurs when all votes were VOTE_COMMIT
+- [x] Liveness: the protocol eventually terminates with all participants decided
 
 ### How to Verify
 Verification should be done by running tests on the specification with the /tlc-cli skill.

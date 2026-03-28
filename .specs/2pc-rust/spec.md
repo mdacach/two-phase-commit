@@ -3,8 +3,8 @@
 > **Superseded.** This spec covers the no-failure baseline only. Crash recovery
 > (WAL, retransmission, `Ack`, `Crash`/`Recover` events) is implemented but not
 > reflected here. The authoritative documentation for the current implementation
-> is the module-level rustdoc in `src/coordinator.rs`, `src/participant.rs`,
-> `src/simulator.rs`, and `src/state_machine.rs`. See also
+> is the module-level rustdoc in `src/coordinator/mod.rs`, `src/participant/mod.rs`,
+> `src/simulator/mod.rs`, and `src/state_machine.rs`. See also
 > `.specs/2pc-crash-recovery/spec.md` for the crash recovery specification.
 
 **Status:** Implemented (no-failure baseline)

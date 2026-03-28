@@ -164,5 +164,5 @@ None.
 ## References
 
 - `.specs/2pc-rust/spec.md` — no-failure baseline spec
-- `src/coordinator.rs`, `src/participant.rs` — authoritative rustdoc
+- `src/coordinator/mod.rs`, `src/participant/mod.rs` — authoritative rustdoc
 - `.specs/2pc-rust/reviews.md` — design decisions from code review
