@@ -55,7 +55,7 @@ the code and understand it less deeply than if I had written it by hand.
 
 All participants vote Commit, coordinator commits:
 
-![Happy path — unanimous commit](examples/happy-path.gif)
+<img src="examples/happy-path.gif" alt="Happy path — unanimous commit" width="1000" height="535">
 
 ### Coordinator crash and recovery
 
@@ -63,7 +63,7 @@ The coordinator crashes after deciding but before collecting acknowledgements.
 After recovery it restores its decision from durable state, retransmits,
 and completes the protocol:
 
-![Coordinator crash and recovery](examples/coordinator-crash.gif)
+<img src="examples/coordinator-crash.gif" alt="Coordinator crash and recovery" width="1000" height="535">
 
 This demonstrates the well-known "blocking" of simple 2PC:
 participants cannot make progress until a crashed coordinator recovers.
