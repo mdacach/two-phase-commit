@@ -1,6 +1,6 @@
 # Two-Phase Commit: Formal Specification and Simulation
 
-A study of the Two-Phase Commit (2PC) protocol, using three approaches:
+An exploration of the Two-Phase Commit (2PC) protocol:
 
 1. **TLA+** (`tla/TwoPhaseCommit.tla`) — safety and liveness model-checked
    with TLC.
@@ -18,34 +18,36 @@ Each verifies the same core properties:
 
 ## Goals
 
-This project is a learning exercise in formal specification and
-deterministic simulation testing. The primary goals were to practice
-writing and model-checking TLA+ specifications, bounded verification
-with Alloy 6, and deterministic discrete-event simulation in Rust.
-Two-phase commit is a small enough protocol to spec and simulate
-end-to-end while still exercising interesting failure modes (coordinator
-crash, message loss, retransmission).
+This project is a learning exercise in formal specification and deterministic
+simulation testing. It follows a [reliable channel simulation][rel-chan] that
+used the same three-pronged approach (TLA+, Alloy, Rust DST) on a simpler
+stop-and-wait protocol.
 
-A secondary goal was testing AI-assisted development with informal
-specs, including using Claude Code skills for learning opportunities
-and authoring assessments/quizzes during the development process.
+A secondary goal was to practice AI-assisted development, including
+using Claude Code skills for [learning opportunities][learn-opp] and
+authoring assessments/quizzes during the development process.
+
+[rel-chan]: https://github.com/mdacach/dst-reliable-channel
+[learn-opp]: https://github.com/DrCatHicks/learning-opportunities
 
 ### Observations on AI-assisted development
 
-Current models struggled with less common tools like Alloy and subtle
-subjects like temporal logic, making a considerable number of mistakes.
-Overall, code produced was of slightly less than average quality, and
-review rounds took significantly longer than expected.
+Even the current strong models struggle with less common tools like Alloy and
+subtle subjects like temporal logic. I caught a considerable number of mistakes
+(and probably missed a few more D:). LLM-churned code was maybe slightly
+less-than-average quality. My review rounds took significantly longer than
+expected (and were more draining than expected, too), but resulting code then
+was decent. A Rust expert would write significantly better code — but I am not
+one of those myself. That being said, the code produced was rarely straight-up
+incorrect.
 
-That said, the results were positive on balance. AI assistance enabled
-tasks I would not have attempted otherwise, like the interactive HTML
-visualization examples. I estimate the code after review rounds is only
-slightly lower quality than what I would have produced by hand, but
-probably significantly worse than what an expert would write.
+Overall I would say the results were positive, primarily because AI assistance
+enabled tasks I would not have attempted otherwise, like the interactive HTML
+visualization examples.
 
-Understanding is harder to evaluate. Even with assessment quizzes and
-learning-opportunity exercises, I likely took longer to understand the
-code and understand it less deeply than if I had written it all by hand.
+My learning is harder to evaluate. Even with assessment quizzes and
+learning-opportunity exercises, I feel I might have taken longer to understand
+the code and understand it less deeply than if I had written it by hand.
 
 ## Examples
 
@@ -57,16 +59,16 @@ All participants vote Commit, coordinator commits:
 
 ### Coordinator crash and recovery
 
-The coordinator crashes after deciding but before collecting Acks.
+The coordinator crashes after deciding but before collecting acknowledgements.
 After recovery it restores its decision from durable state, retransmits,
 and completes the protocol:
 
 ![Coordinator crash and recovery](examples/coordinator-crash.gif)
 
-This demonstrates the well-known blocking vulnerability of 2PC:
-participants cannot make progress until the coordinator recovers.
+This demonstrates the well-known "blocking" of simple 2PC:
+participants cannot make progress until a crashed coordinator recovers.
 
-Run the examples yourself:
+Run the examples:
 
 ```sh
 cargo run --example timeline     # text timelines for all scenarios
@@ -76,11 +78,13 @@ cargo run --example visualize    # interactive HTML trace (opens in browser)
 ## Design
 
 The simulation design is inspired by the "theater of state machines"
-model described in [Sled's simulation guide][sled-sim]: protocol actors
-are state machines that communicate exclusively through message passing,
-driven by a central simulator that acts as a message bus and scheduler.
+model described in [Sled's simulation guide][sled-sim] and
+[Polar Signals' DST writeup][polar-dst]: protocol actors are state
+machines that communicate exclusively through message passing, driven
+by a central simulator that acts as a message bus and scheduler.
 
 [sled-sim]: https://sled.rs/simulation.html
+[polar-dst]: https://www.polarsignals.com/blog/posts/2025/07/08/dst-rust
 
 Actors implement a `StateMachine` trait:
 
